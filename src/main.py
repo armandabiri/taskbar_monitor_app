@@ -1,15 +1,16 @@
-"""Taskbar system monitor widget for CPU, RAM, and network usage."""
-
+import ctypes
 import logging
+import os
 import sys
 
 import psutil
 from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QContextMenuEvent,
+    QIcon,
     QMouseEvent,
-    QPaintEvent,
     QPainter,
+    QPaintEvent,
 )
 from PyQt6.QtWidgets import (
     QApplication,
@@ -20,36 +21,45 @@ from PyQt6.QtWidgets import (
 
 # Core
 from core.config import (
-    APP_ORG,
     APP_NAME,
-    DEFAULT_INTERVAL_MS,
-    DEFAULT_BG_OPACITY,
-    DEFAULT_POS,
-    DEFAULT_WIDTH,
-    DEFAULT_HEIGHT,
-    DEFAULT_FALLBACK_WIDTH,
-    DEFAULT_SCREEN_PAD,
-    MIN_WIDGET_WIDTH,
-    MIN_WIDGET_HEIGHT,
-    EDGE_MARGIN,
+    APP_ORG,
     CPU_WARMUP_INTERVAL_SECONDS,
-    MB,
+    DEFAULT_BG_OPACITY,
+    DEFAULT_FALLBACK_WIDTH,
+    DEFAULT_HEIGHT,
+    DEFAULT_INTERVAL_MS,
+    DEFAULT_POS,
+    DEFAULT_SCREEN_PAD,
+    DEFAULT_WIDTH,
+    EDGE_MARGIN,
     KB,
+    MB,
+    MIN_WIDGET_HEIGHT,
+    MIN_WIDGET_WIDTH,
     read_setting_int,
 )
 from core.theme import ThemeEngine
-
-# UI
-from ui.widgets import CPUBarWidget, ScopeWidget
-from ui.timer_widget import CountdownTimerWidget
-from ui.menu_handler import ContextMenuHandler, AutostartManager
+from services.notification_service import NotificationService
 
 # Services
 from services.resource_manager import release_resources
-from services.notification_service import NotificationService
 from services.shortcut_service import ShortcutService
-
+# UI
+from ui.widgets import CPUBarWidget, ScopeWidget
+from ui.timer_widget import CountdownTimerWidget
+from ui.menu_handler import AutostartManager, ContextMenuHandler
 LOGGER = logging.getLogger(__name__)
+
+
+def get_resource_path(relative_path: str) -> str:
+    """Get absolute path to resource, works for dev and for PyInstaller."""
+    try:
+        # PyInstaller creates a temp folder and stores path in _MEIPASS
+        base_path = sys._MEIPASS  # type: ignore
+    except (AttributeError, Exception):
+        # We assume assets are in src/assets/ relative to this file
+        base_path = os.path.dirname(__file__)
+    return os.path.join(base_path, relative_path)
 
 
 class TaskbarMonitor(QWidget):
@@ -62,6 +72,12 @@ class TaskbarMonitor(QWidget):
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
         super().__init__()
+
+        # Set Application Icon
+        icon_path = get_resource_path(os.path.join("assets", "taskbar-monitor.svg"))
+        if os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
+
         self.request_release.connect(lambda: self._on_release_resources(aggressive=False))
         self.request_aggressive.connect(lambda: self._on_release_resources(aggressive=True))
         self.setWindowFlags(
@@ -170,7 +186,7 @@ class TaskbarMonitor(QWidget):
             result = release_resources(aggressive=aggressive)
             LOGGER.info("Resource release (%s): %s", "Aggressive" if aggressive else "AutoSmart", result.summary)
             btn.setToolTip(f"Last freed: {result.ram_freed_mb:.1f} MB")
-            
+
             # Show system notification
             mode_name = "Aggressive Clear" if aggressive else "AutoSmart Clear"
             NotificationService.notify(mode_name, result.details)
@@ -365,7 +381,30 @@ def main() -> int:
     app = QApplication(sys.argv)
     psutil.cpu_percent(interval=CPU_WARMUP_INTERVAL_SECONDS)
     monitor = TaskbarMonitor()
+    # Explicitly ensure window flags are set correctly
+    monitor.setWindowFlags(
+        Qt.WindowType.FramelessWindowHint
+        | Qt.WindowType.WindowStaysOnTopHint
+        | Qt.WindowType.Tool
+    )
     monitor.show()
+    
+    # Force Topmost using Windows API for reliability (especially over the taskbar)
+    try:
+        hwnd = monitor.winId()
+        HWND_TOPMOST = -1
+        SWP_NOMOVE = 0x0002
+        SWP_NOSIZE = 0x0001
+        SWP_SHOWWINDOW = 0x0040
+        ctypes.windll.user32.SetWindowPos(
+            int(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
+        )
+    except Exception as e:
+        LOGGER.warning(f"Failed to force topmost via Win32 API: {e}")
+
+    # Secondary enforcement for Always on Top
+    monitor.raise_()
     return app.exec()
 
 

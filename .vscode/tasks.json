@@ -19,11 +19,10 @@
             "problemMatcher": []
         },
         {
-            "label": "Install Dependencies",
+            "label": "Install Dependencies (Fast - uv)",
             "type": "shell",
-            "command": "${workspaceFolder}/.venv/Scripts/python.exe",
+            "command": "uv",
             "args": [
-                "-m",
                 "pip",
                 "install",
                 "-e",
@@ -32,30 +31,29 @@
             "problemMatcher": []
         },
         {
-            "label": "Lint: Ruff",
+            "label": "Build EXE: PyInstaller (Fast Dev)",
             "type": "shell",
             "command": "${workspaceFolder}/.venv/Scripts/python.exe",
             "args": [
                 "-m",
-                "ruff",
-                "check",
-                "src"
+                "PyInstaller",
+                "--noconsole",
+                "--onedir",
+                "--clean",
+                "--add-data",
+                "src/assets;assets",
+                "--workpath=${workspaceFolder}/build",
+                "--distpath=${workspaceFolder}/dist",
+                "--specpath=${workspaceFolder}/build",
+                "--paths=${workspaceFolder}/src",
+                "--name=TaskbarMonitor_Dev",
+                "src/main.py"
             ],
-            "problemMatcher": []
+            "problemMatcher": [],
+            "group": "build"
         },
         {
-            "label": "Type Check: Pyright",
-            "type": "shell",
-            "command": "${workspaceFolder}/.venv/Scripts/python.exe",
-            "args": [
-                "-m",
-                "pyright",
-                "src"
-            ],
-            "problemMatcher": []
-        },
-        {
-            "label": "Build EXE: PyInstaller",
+            "label": "Build EXE: PyInstaller (Production)",
             "type": "shell",
             "command": "${workspaceFolder}/.venv/Scripts/python.exe",
             "args": [
@@ -63,6 +61,13 @@
                 "PyInstaller",
                 "--noconsole",
                 "--onefile",
+                "--clean",
+                "--add-data",
+                "src/assets;assets",
+                "--exclude-module=PyQt6.QtWebEngine",
+                "--exclude-module=PyQt6.QtSql",
+                "--exclude-module=PyQt6.QtTest",
+                "--exclude-module=PyQt6.QtXml",
                 "--workpath=${workspaceFolder}/build",
                 "--distpath=${workspaceFolder}/dist",
                 "--specpath=${workspaceFolder}/build",
