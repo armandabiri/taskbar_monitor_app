@@ -1,0 +1,36 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "Intelag: Run All Checks (Ruff + Mypy)",
+            "type": "shell",
+            "command": "ruff check . && mypy .",
+            "problemMatcher": [
+                "$ruff",
+                "$mypy"
+            ],
+            "group": {
+                "kind": "test",
+                "isDefault": true
+            },
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated"
+            }
+        },
+        {
+            "label": "Intelag: Run Pytest",
+            "type": "shell",
+            "command": "pytest",
+            "group": "test",
+            "presentation": {
+                "echo": true,
+                "reveal": "always",
+                "focus": true,
+                "panel": "dedicated"
+            }
+        }
+    ]
+}

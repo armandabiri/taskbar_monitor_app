@@ -1,0 +1,91 @@
+{
+    // Intelag Standard VS Code Settings
+    "workbench.editor.wrapTabs": true,
+    "workbench.editor.tabSizing": "shrink",
+    "workbench.editor.enablePreview": false,
+    "workbench.editor.labelFormat": "short",
+    "workbench.editor.highlightModifiedTabs": false,
+    "workbench.editor.pinnedTabSizing": "normal",
+    "workbench.editor.pinnedTabsOnSeparateRow": true,
+    "workbench.editor.showTabs": "multiple",
+    "editor.tabFocusMode": false,
+    "editor.rulers": [120],
+
+    // Files & Explorer
+    "files.autoSave": "afterDelay",
+    "files.autoSaveDelay": 1000,
+    "files.exclude": {
+        "**/__pycache__": true,
+        "**/.pytest_cache": true,
+        "**/.mypy_cache": true,
+        "**/.venv": false
+    },
+    "explorer.copyPathSeparator": "/",
+    "explorer.copyRelativePathSeparator": "/",
+
+    // Python Configuration
+    "python.defaultInterpreterPath": "${workspaceFolder}/.venv/Scripts/python.exe",
+    "python.terminal.activateEnvironment": true,
+    "python.languageServer": "Pylance",
+    "python.analysis.typeCheckingMode": "strict",
+    "python.analysis.diagnosticMode": "workspace",
+    "python.analysis.indexing": true,
+    "python.analysis.autoSearchPaths": true,
+    "python.analysis.autoImportCompletions": true,
+    "python.analysis.useLibraryCodeForTypes": true,
+    "python.analysis.inlayHints.functionReturnTypes": true,
+    "python.analysis.inlayHints.variableTypes": true,
+
+    // Linting & Formatting
+    "python.linting.enabled": true,
+    "python.linting.ruffEnabled": true,
+    "python.linting.mypyEnabled": true,
+    "python.linting.mypyArgs": [
+        "--strict",
+        "--ignore-missing-imports",
+        "--follow-imports=normal",
+        "--show-column-numbers",
+        "--namespace-packages",
+        "--explicit-package-bases",
+        "--config-file=${workspaceFolder}/.intelag/python/mypy.ini"
+    ],
+    "ruff.configuration": "${workspaceFolder}/.intelag/python/ruff.toml",
+    "[python]": {
+        "editor.formatOnSave": true,
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.codeActionsOnSave": {
+            "source.organizeImports": "explicit",
+            "source.fixAll.ruff": "explicit"
+        }
+    },
+
+    // Testing
+    "python.testing.pytestEnabled": true,
+    "python.testing.pytestArgs": [
+        "-c", "${workspaceFolder}/.intelag/python/pyproject.toml"
+    ],
+
+    // Terminal
+    "terminal.integrated.scrollback": 50000,
+
+    // Dart & Flutter Configuration
+    "dart.analysisServerFolding": false,
+    "dart.showTodos": false,
+    "dart.analyzerDiagnosticsPort": null,
+    "dart.analyzeAngularTemplates": false,
+    "dart.analysisExcludedFolders": [
+        "build",
+        ".dart_tool",
+        ".pub-cache"
+    ],
+
+    // CSpell
+    "cSpell.words": [
+        "intelag",
+        "ruff",
+        "mypy",
+        "pytest",
+        "venv",
+        "Impeller"
+    ]
+}

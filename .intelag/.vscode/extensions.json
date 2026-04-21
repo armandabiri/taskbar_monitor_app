@@ -1,0 +1,15 @@
+{
+    // Intelag Recommended Extensions
+    "recommendations": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-python.debugpy",
+        "charliermarsh.ruff",
+        "ms-python.mypy-type-checker",
+        "tamasfe.even-better-toml",
+        "streetsidesoftware.code-spell-checker",
+        "usernamehw.errorlens",
+        "igorsbitnev.error-gutters",
+        "mechatroner.rainbow-csv"
+    ]
+}
