@@ -112,16 +112,54 @@ class TaskbarMonitor(QWidget):
         self.shortcut_service = ShortcutService()
         self.shortcut_service.register_shortcuts(self)
 
+    def _apply_win32_topmost(self) -> None:
+        """Apply Win32 extended styles after the window is shown."""
+        try:
+            self._hwnd = int(self.winId())
+
+            # Add WS_EX_TOOLWINDOW to hide from Alt+Tab / taskbar
+            GWL_EXSTYLE = -20
+            WS_EX_TOOLWINDOW = 0x00000080
+            WS_EX_TOPMOST = 0x00000008
+            WS_EX_NOACTIVATE = 0x08000000
+            user32 = ctypes.windll.user32
+            cur_style = user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
+            user32.SetWindowLongW(
+                self._hwnd, GWL_EXSTYLE,
+                cur_style | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
+            )
+
+            # Force HWND_TOPMOST position
+            HWND_TOPMOST = -1
+            SWP_NOMOVE = 0x0002
+            SWP_NOSIZE = 0x0001
+            SWP_NOACTIVATE = 0x0010
+            SWP_FRAMECHANGED = 0x0020
+            user32.SetWindowPos(
+                self._hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+            )
+        except Exception as exc:
+            LOGGER.warning("Failed to apply Win32 topmost styles: %s", exc)
+
     def _enforce_topmost(self) -> None:
-        """Periodically re-assert topmost Z-order via Win32 API."""
+        """Periodically re-assert topmost Z-order via Win32 API.
+
+        Uses the 'toggle trick': briefly remove topmost, then re-add it.
+        This forces Windows DWM to recalculate Z-order, reliably
+        placing the window above the Windows 11 taskbar.
+        """
         try:
             if not self._hwnd:
                 self._hwnd = int(self.winId())
-            hwnd_topmost = -1
-            swp_flags = 0x0002 | 0x0001 | 0x0040  # NOMOVE | NOSIZE | SHOWWINDOW
-            ctypes.windll.user32.SetWindowPos(
-                self._hwnd, hwnd_topmost, 0, 0, 0, 0, swp_flags
-            )
+            user32 = ctypes.windll.user32
+            swp_flags = 0x0002 | 0x0001 | 0x0010  # NOMOVE | NOSIZE | NOACTIVATE
+
+            # Step 1: Briefly remove topmost
+            user32.SetWindowPos(self._hwnd, -2, 0, 0, 0, 0, swp_flags)  # HWND_NOTOPMOST
+
+            # Step 2: Re-add topmost — forces DWM to recalculate
+            user32.SetWindowPos(self._hwnd, -1, 0, 0, 0, 0, swp_flags)  # HWND_TOPMOST
         except Exception:
             pass
 
@@ -400,30 +438,11 @@ def main() -> int:
     app = QApplication(sys.argv)
     psutil.cpu_percent(interval=CPU_WARMUP_INTERVAL_SECONDS)
     monitor = TaskbarMonitor()
-    # Explicitly ensure window flags are set correctly
-    monitor.setWindowFlags(
-        Qt.WindowType.FramelessWindowHint
-        | Qt.WindowType.WindowStaysOnTopHint
-        | Qt.WindowType.Tool
-    )
     monitor.show()
-    
-    # Force Topmost using Windows API for reliability (especially over the taskbar)
-    try:
-        hwnd = monitor.winId()
-        HWND_TOPMOST = -1
-        SWP_NOMOVE = 0x0002
-        SWP_NOSIZE = 0x0001
-        SWP_SHOWWINDOW = 0x0040
-        ctypes.windll.user32.SetWindowPos(
-            int(hwnd), HWND_TOPMOST, 0, 0, 0, 0,
-            SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW
-        )
-    except Exception as e:
-        LOGGER.warning(f"Failed to force topmost via Win32 API: {e}")
 
-    # Secondary enforcement for Always on Top
-    monitor.raise_()
+    # Apply Win32 extended styles for reliable topmost over Windows taskbar
+    monitor._apply_win32_topmost()
+
     return app.exec()
 
 
