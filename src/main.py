@@ -319,12 +319,14 @@ class TaskbarMonitor(QWidget):
             self.m_resize_edge = edge
             return
         self.m_drag = True
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.m_drag_pos = a0.globalPosition().toPoint() - self.pos()
 
     def mouseMoveEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
         """Handle mouse move for dragging/resizing."""
         if a0 is None:
             return
+            
         if self.m_resize:
             rect = self.geometry()
             global_point = a0.globalPosition().toPoint()
@@ -341,12 +343,13 @@ class TaskbarMonitor(QWidget):
             return
 
         if self.m_drag:
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
             self.move(a0.globalPosition().toPoint() - self.m_drag_pos)
             return
 
         edge = self.get_edge(a0.pos())
         if edge is None:
-            self.setCursor(Qt.CursorShape.ArrowCursor)
+            self.setCursor(Qt.CursorShape.SizeAllCursor)
             return
         if edge in ("right", "left"):
             self.setCursor(Qt.CursorShape.SizeHorCursor)
@@ -362,6 +365,7 @@ class TaskbarMonitor(QWidget):
         del a0
         self.m_drag = False
         self.m_resize = False
+        self.setCursor(Qt.CursorShape.ArrowCursor)
         self.save_geometry()
 
     def contextMenuEvent(self, a0: QContextMenuEvent | None) -> None:  # pylint: disable=invalid-name
