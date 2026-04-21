@@ -97,18 +97,33 @@ class TaskbarMonitor(QWidget):
         self.m_resize = False
         self.m_resize_edge = ""
         self.m_drag_pos = QPoint()
+        self._hwnd: int = 0  # Cached window handle for topmost enforcement
 
         self.menu_handler = ContextMenuHandler(self)
         self.setup_ui()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_stats)
+        self.timer.timeout.connect(self._enforce_topmost)
         self.timer.start(self.interval)
         self.load_geometry()
 
         # Global shortcuts
         self.shortcut_service = ShortcutService()
         self.shortcut_service.register_shortcuts(self)
+
+    def _enforce_topmost(self) -> None:
+        """Periodically re-assert topmost Z-order via Win32 API."""
+        try:
+            if not self._hwnd:
+                self._hwnd = int(self.winId())
+            hwnd_topmost = -1
+            swp_flags = 0x0002 | 0x0001 | 0x0040  # NOMOVE | NOSIZE | SHOWWINDOW
+            ctypes.windll.user32.SetWindowPos(
+                self._hwnd, hwnd_topmost, 0, 0, 0, 0, swp_flags
+            )
+        except Exception:
+            pass
 
     def setup_ui(self) -> None:
         """Create child widgets and layout."""
