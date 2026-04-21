@@ -1,0 +1,54 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "taskbar-monitor-app"
+version = "1.0.0"
+description = "A lightweight Windows 11 taskbar resource monitor with timer and system cleanup tools."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Arman", email = "arman@example.com"}
+]
+dependencies = [
+    "psutil",
+    "PyQt6",
+    "win11toast",
+    "keyboard",
+]
+
+[project.optional-dependencies]
+dev = [
+    "types-psutil",
+    "pyright",
+    "ruff",
+    "pylint",
+    "pyinstaller",
+]
+
+[project.scripts]
+taskbar-monitor = "main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pyright]
+include = ["src"]
+venvPath = "."
+venv = ".venv"
+typeCheckingMode = "basic"
+
+[tool.ruff]
+select = ["E", "F", "I", "N", "W"]
+line-length = 100
+target-version = "py39"
+
+[tool.pylint]
+max-line-length = 100
+disable = [
+    "C0114", # Missing module docstring
+    "C0115", # Missing class docstring
+    "C0116", # Missing function docstring
+]

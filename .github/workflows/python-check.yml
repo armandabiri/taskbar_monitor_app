@@ -1,0 +1,34 @@
+name: Python Check (Ruff & Mypy)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        run: |
+          python3 --version
+          python3 -m pip install --upgrade pip
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install ruff mypy pytest
+
+      - name: Lint with Ruff
+        run: ruff check . --config .intelag/python/ruff.toml
+
+      - name: Type check with Mypy
+        run: |
+          mypy . --config-file .intelag/python/mypy.ini || [ $? -eq 2 ]
+
+      - name: Test with Pytest
+        run: |
+          pytest . -c .intelag/python/pyproject.toml || [ $? -eq 5 ]

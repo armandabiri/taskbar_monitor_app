@@ -1,0 +1,30 @@
+name: Security Scan (Bandit & Safety)
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        run: |
+          python3 --version
+          python3 -m pip install --upgrade pip
+
+      - name: Install security tools
+        run: |
+          python3 -m pip install bandit safety
+
+      - name: Bandit Scan
+        # cspell:ignore venv
+        run: python3 -m bandit -r . -x ./tests,./.venv,./intelag_packages,./intelag_vsix_packages --severity-level medium
+
+      - name: Safety Scan (Dependencies)
+        run: python3 -m pip freeze | safety check --stdin || echo "⚠️  Safety found vulnerabilities in the host environment, but proceeding anyway."

@@ -1,0 +1,25 @@
+name: Git Sanity Check
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for Merge Conflict Markers
+        run: |
+          if grep -rln "<<<""<<<<" . --exclude-dir=.git; then
+            echo "Merge conflict markers found!"
+            exit 1
+          fi
+
+      - name: Check for large files
+        run: |
+          find . -type f -size +5M -not -path '*/.*' | grep . && exit 1 || exit 0
