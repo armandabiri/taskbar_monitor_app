@@ -4,7 +4,7 @@ import os
 import sys
 
 import psutil
-from PyQt6.QtCore import QPoint, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import (
     QContextMenuEvent,
     QIcon,
@@ -23,11 +23,17 @@ from PyQt6.QtWidgets import (
 from core.config import (
     APP_NAME,
     APP_ORG,
+    COLOR_GPU,
+    COLOR_TEMP,
+    COLOR_VRAM,
     CPU_WARMUP_INTERVAL_SECONDS,
+    DEFAULT_AUTOHIDE_FULLSCREEN,
     DEFAULT_BG_OPACITY,
+    DEFAULT_CLICK_THROUGH,
     DEFAULT_FALLBACK_WIDTH,
     DEFAULT_HEIGHT,
     DEFAULT_INTERVAL_MS,
+    DEFAULT_MINIMIZE_TO_TRAY,
     DEFAULT_POS,
     DEFAULT_SCREEN_PAD,
     DEFAULT_WIDTH,
@@ -44,11 +50,69 @@ from services.notification_service import NotificationService
 # Services
 from services.resource_manager import release_resources
 from services.shortcut_service import ShortcutService
+from services.system_info import (
+    foreground_is_fullscreen,
+    get_battery,
+    get_cpu_temp,
+    get_gpu_stats,
+    prime_process_cpu,
+)
 # UI
-from ui.widgets import CPUBarWidget, ScopeWidget
-from ui.timer_widget import CountdownTimerWidget
+from ui.battery_widget import BatteryWidget
 from ui.menu_handler import AutostartManager, ContextMenuHandler
+from ui.process_popup import TopProcessesPopup
+from ui.system_tray import build_tray
+from ui.timer_widget import CountdownTimerWidget
+from ui.widgets import CPUBarWidget, ScopeWidget
+
 LOGGER = logging.getLogger(__name__)
+
+
+# Win32 constants for window styles
+_GWL_EXSTYLE = -20
+_WS_EX_TOOLWINDOW = 0x00000080
+_WS_EX_TOPMOST = 0x00000008
+_WS_EX_NOACTIVATE = 0x08000000
+_WS_EX_LAYERED = 0x00080000
+_WS_EX_TRANSPARENT = 0x00000020
+_HWND_TOPMOST = -1
+_HWND_NOTOPMOST = -2
+_SWP_NOMOVE = 0x0002
+_SWP_NOSIZE = 0x0001
+_SWP_NOACTIVATE = 0x0010
+_SWP_NOZORDER = 0x0004
+_SWP_FRAMECHANGED = 0x0020
+_WM_WINDOWPOSCHANGING = 0x0046
+
+
+class _POINT(ctypes.Structure):
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _MSG(ctypes.Structure):
+    """Windows MSG — only fields we need, full layout so ctypes aligns right."""
+    _fields_ = [
+        ("hwnd", ctypes.c_ssize_t),
+        ("message", ctypes.c_uint),
+        ("wParam", ctypes.c_ssize_t),
+        ("lParam", ctypes.c_ssize_t),
+        ("time", ctypes.c_ulong),
+        ("pt", _POINT),
+        ("lPrivate", ctypes.c_ulong),
+    ]
+
+
+class _WINDOWPOS(ctypes.Structure):
+    """Windows WINDOWPOS struct — layout must match native Win32."""
+    _fields_ = [
+        ("hwnd", ctypes.c_ssize_t),
+        ("hwndInsertAfter", ctypes.c_ssize_t),
+        ("x", ctypes.c_int),
+        ("y", ctypes.c_int),
+        ("cx", ctypes.c_int),
+        ("cy", ctypes.c_int),
+        ("flags", ctypes.c_uint),
+    ]
 
 
 def get_resource_path(relative_path: str) -> str:
@@ -68,18 +132,22 @@ class TaskbarMonitor(QWidget):
     # Thread-safe signals for global shortcuts
     request_release = pyqtSignal()
     request_aggressive = pyqtSignal()
+    request_toggle_click_through = pyqtSignal()
 
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
         super().__init__()
 
         # Set Application Icon
-        icon_path = get_resource_path(os.path.join("assets", "taskbar-monitor.svg"))
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        self._icon_path = get_resource_path(os.path.join("assets", "taskbar-monitor.svg"))
+        if os.path.exists(self._icon_path):
+            self.setWindowIcon(QIcon(self._icon_path))
 
         self.request_release.connect(lambda: self._on_release_resources(aggressive=False))
         self.request_aggressive.connect(lambda: self._on_release_resources(aggressive=True))
+        self.request_toggle_click_through.connect(
+            lambda: self.set_click_through(not self.click_through)
+        )
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -91,85 +159,215 @@ class TaskbarMonitor(QWidget):
         self.settings = QSettings(APP_ORG, APP_NAME)
         self.interval = read_setting_int(self.settings, "interval", DEFAULT_INTERVAL_MS)
         self.bg_opacity = read_setting_int(self.settings, "bg_opacity", DEFAULT_BG_OPACITY)
+        self.click_through = bool(read_setting_int(
+            self.settings, "click_through", DEFAULT_CLICK_THROUGH))
+        self.autohide_fullscreen = bool(read_setting_int(
+            self.settings, "autohide_fullscreen", DEFAULT_AUTOHIDE_FULLSCREEN))
+        self.minimize_to_tray = bool(read_setting_int(
+            self.settings, "minimize_to_tray", DEFAULT_MINIMIZE_TO_TRAY))
+
         self.old_net = psutil.net_io_counters()
+        self.old_disk = psutil.disk_io_counters()
 
         self.m_drag = False
         self.m_resize = False
         self.m_resize_edge = ""
         self.m_drag_pos = QPoint()
-        self._hwnd: int = 0  # Cached window handle for topmost enforcement
+        self._hwnd: int = 0
+        self._topmost_applied = False
+        self._hidden_for_fullscreen = False
 
         self.menu_handler = ContextMenuHandler(self)
+
+        # Probe optional capabilities before building UI
+        self._gpu_available = get_gpu_stats().available
+        self._battery_available = get_battery() is not None
+        self._temp_available = get_cpu_temp() is not None or (
+            self._gpu_available and get_gpu_stats().temp_c is not None
+        )
+
+        self.process_popup: TopProcessesPopup | None = None
+        self._last_release_error_count = 0
+
         self.setup_ui()
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_stats)
-        self.timer.timeout.connect(self._enforce_topmost)
+        self.timer.timeout.connect(self._check_fullscreen_autohide)
         self.timer.start(self.interval)
+
+        # Topmost enforcement runs on its own fast, fixed-rate timer so that
+        # a slow (Eco) stats interval doesn't let the Win11 taskbar get above us.
+        self.topmost_timer = QTimer(self)
+        self.topmost_timer.setInterval(500)
+        self.topmost_timer.timeout.connect(self._enforce_topmost)
+        self.topmost_timer.start()
+
         self.load_geometry()
 
-        # Global shortcuts
+        # Global shortcuts — capture failures for user-visible warning
         self.shortcut_service = ShortcutService()
-        self.shortcut_service.register_shortcuts(self)
+        failed_hotkeys = self.shortcut_service.register_shortcuts(self)
+        if failed_hotkeys:
+            NotificationService.notify(
+                APP_NAME,
+                f"Could not register {len(failed_hotkeys)} global hotkey(s): "
+                + ", ".join(failed_hotkeys),
+            )
 
+        # System tray
+        self.tray = build_tray(
+            parent=self,
+            icon_path=self._icon_path,
+            on_toggle_visibility=self.toggle_visibility,
+            on_release_smart=lambda: self._on_release_resources(aggressive=False),
+            on_release_aggressive=lambda: self._on_release_resources(aggressive=True),
+            on_show_processes=self.show_processes_popup,
+            get_click_through=lambda: self.click_through,
+            on_set_click_through=self.set_click_through,
+        )
+
+    # ------------------------------------------------------------------
+    # Window topmost enforcement
+    # ------------------------------------------------------------------
     def _apply_win32_topmost(self) -> None:
-        """Apply Win32 extended styles after the window is shown."""
+        """Apply Win32 extended styles. Idempotent — safe to call repeatedly."""
         try:
             self._hwnd = int(self.winId())
-
-            # Add WS_EX_TOOLWINDOW to hide from Alt+Tab / taskbar
-            GWL_EXSTYLE = -20
-            WS_EX_TOOLWINDOW = 0x00000080
-            WS_EX_TOPMOST = 0x00000008
-            WS_EX_NOACTIVATE = 0x08000000
             user32 = ctypes.windll.user32
-            cur_style = user32.GetWindowLongW(self._hwnd, GWL_EXSTYLE)
-            user32.SetWindowLongW(
-                self._hwnd, GWL_EXSTYLE,
-                cur_style | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE
-            )
-
-            # Force HWND_TOPMOST position
-            HWND_TOPMOST = -1
-            SWP_NOMOVE = 0x0002
-            SWP_NOSIZE = 0x0001
-            SWP_NOACTIVATE = 0x0010
-            SWP_FRAMECHANGED = 0x0020
+            cur_style = user32.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
+            new_style = cur_style | _WS_EX_TOOLWINDOW | _WS_EX_TOPMOST | _WS_EX_NOACTIVATE
+            if self.click_through:
+                new_style |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT
+            if new_style != cur_style:
+                user32.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, new_style)
             user32.SetWindowPos(
-                self._hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_FRAMECHANGED,
             )
-        except Exception as exc:
+            self._topmost_applied = True
+        except OSError as exc:
             LOGGER.warning("Failed to apply Win32 topmost styles: %s", exc)
 
     def _enforce_topmost(self) -> None:
-        """Periodically re-assert topmost Z-order via Win32 API.
-
-        Uses the 'toggle trick': briefly remove topmost, then re-add it.
-        This forces Windows DWM to recalculate Z-order, reliably
-        placing the window above the Windows 11 taskbar.
-        """
+        """Periodically re-assert topmost Z-order via Win32 API."""
+        if not self._hwnd or not self.isVisible():
+            return
         try:
-            if not self._hwnd:
-                self._hwnd = int(self.winId())
             user32 = ctypes.windll.user32
-            swp_flags = 0x0002 | 0x0001 | 0x0010  # NOMOVE | NOSIZE | NOACTIVATE
-
-            # Step 1: Briefly remove topmost
-            user32.SetWindowPos(self._hwnd, -2, 0, 0, 0, 0, swp_flags)  # HWND_NOTOPMOST
-
-            # Step 2: Re-add topmost — forces DWM to recalculate
-            user32.SetWindowPos(self._hwnd, -1, 0, 0, 0, 0, swp_flags)  # HWND_TOPMOST
-        except Exception:
+            swp_flags = _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE
+            # Toggle trick forces DWM to recompute Z-order above the Win11 taskbar.
+            user32.SetWindowPos(self._hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0, swp_flags)
+            user32.SetWindowPos(self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0, swp_flags)
+        except OSError:
             pass
 
+    def nativeEvent(self, event_type, message):  # pylint: disable=invalid-name
+        """Intercept WM_WINDOWPOSCHANGING to pin ourselves at HWND_TOPMOST.
+
+        Windows sends WM_WINDOWPOSCHANGING before every Z-order change. By
+        rewriting the `hwndInsertAfter` field to HWND_TOPMOST in-place, we
+        prevent the Win11 taskbar (or any other window) from ever being
+        placed above us — even between ticks of the 500ms enforcement timer.
+        """
+        try:
+            if event_type == b"windows_generic_MSG" and self._topmost_applied:
+                msg = ctypes.cast(int(message), ctypes.POINTER(_MSG)).contents
+                if msg.message == _WM_WINDOWPOSCHANGING and msg.lParam:
+                    wp = ctypes.cast(msg.lParam, ctypes.POINTER(_WINDOWPOS)).contents
+                    if not (wp.flags & _SWP_NOZORDER):
+                        wp.hwndInsertAfter = _HWND_TOPMOST  # -1
+        except (ValueError, OSError):
+            pass
+        return False, 0
+
+    def showEvent(self, a0) -> None:  # pylint: disable=invalid-name
+        """Re-apply topmost every time the window becomes visible."""
+        super().showEvent(a0)
+        # Deferred slightly so winId() has a real HWND on first show.
+        QTimer.singleShot(0, self._apply_win32_topmost)
+        QTimer.singleShot(50, self._enforce_topmost)
+
+    # ------------------------------------------------------------------
+    # Click-through toggle
+    # ------------------------------------------------------------------
+    def set_click_through(self, enabled: bool) -> None:
+        """Toggle click-through mode and persist the setting."""
+        self.click_through = enabled
+        self.settings.setValue("click_through", 1 if enabled else 0)
+        self.settings.sync()
+        if self._hwnd:
+            try:
+                user32 = ctypes.windll.user32
+                cur = user32.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
+                if enabled:
+                    cur |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT
+                else:
+                    cur &= ~_WS_EX_TRANSPARENT  # keep LAYERED; removing it can cause flicker
+                user32.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, cur)
+            except OSError as exc:
+                LOGGER.warning("Failed to toggle click-through: %s", exc)
+        NotificationService.notify(
+            APP_NAME,
+            "Click-through ON — window ignores mouse. Press Ctrl+Shift+Alt+C to disable."
+            if enabled
+            else "Click-through OFF — window accepts mouse again.",
+        )
+
+    def set_autohide_fullscreen(self, enabled: bool) -> None:
+        """Toggle auto-hide on fullscreen and persist."""
+        self.autohide_fullscreen = enabled
+        self.settings.setValue("autohide_fullscreen", 1 if enabled else 0)
+        self.settings.sync()
+        if not enabled and self._hidden_for_fullscreen:
+            self._hidden_for_fullscreen = False
+            self.show()
+
+    def set_minimize_to_tray(self, enabled: bool) -> None:
+        """Toggle minimize-to-tray and persist."""
+        self.minimize_to_tray = enabled
+        self.settings.setValue("minimize_to_tray", 1 if enabled else 0)
+        self.settings.sync()
+
+    def _check_fullscreen_autohide(self) -> None:
+        """Hide when a fullscreen app is in the foreground; restore otherwise."""
+        if not self.autohide_fullscreen:
+            return
+        fullscreen = foreground_is_fullscreen()
+        if fullscreen and not self._hidden_for_fullscreen and self.isVisible():
+            self._hidden_for_fullscreen = True
+            self.hide()
+        elif not fullscreen and self._hidden_for_fullscreen:
+            self._hidden_for_fullscreen = False
+            self.show()
+
+    def toggle_visibility(self) -> None:
+        """Show or hide the monitor (used by tray icon)."""
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.raise_()
+
+    def show_processes_popup(self) -> None:
+        """Open (or raise) the top-processes popup."""
+        if self.process_popup is None:
+            self.process_popup = TopProcessesPopup()
+        pos = self.pos()
+        self.process_popup.move(pos.x(), max(0, pos.y() - 240))
+        self.process_popup.show()
+        self.process_popup.raise_()
+        self.process_popup.activateWindow()
+
+    # ------------------------------------------------------------------
+    # UI
+    # ------------------------------------------------------------------
     def setup_ui(self) -> None:
         """Create child widgets and layout."""
         self.main_layout = QHBoxLayout(self)
         self.main_layout.setContentsMargins(10, 5, 10, 5)
         self.main_layout.setSpacing(12)
 
-        # --- Left side: Resource Release buttons ---
         btn_style = """
             QPushButton {
                 background-color: rgba(40, 40, 40, 200);
@@ -194,7 +392,9 @@ class TaskbarMonitor(QWidget):
 
         # AutoSmart Button
         self.smart_btn = QPushButton("🧠", self)
-        self.smart_btn.setToolTip("AutoSmart: Release memory (skips active apps) [Ctrl+Shift+Alt+Delete]")
+        self.smart_btn.setToolTip(
+            "AutoSmart: Release memory (skips active apps) [Ctrl+Shift+Alt+Delete]"
+        )
         self.smart_btn.setFixedSize(24, 24)
         self.smart_btn.setStyleSheet(btn_style)
         self.smart_btn.clicked.connect(lambda: self._on_release_resources(aggressive=False))
@@ -202,26 +402,51 @@ class TaskbarMonitor(QWidget):
 
         # Aggressive Button
         self.aggressive_btn = QPushButton("⚡", self)
-        self.aggressive_btn.setToolTip("Aggressive: Deep memory cleanup (all background apps) [Ctrl+Shift+Alt+Backspace]")
+        self.aggressive_btn.setToolTip(
+            "Aggressive: Deep memory cleanup (all background apps) [Ctrl+Shift+Alt+Backspace]"
+        )
         self.aggressive_btn.setFixedSize(24, 24)
         self.aggressive_btn.setStyleSheet(btn_style)
         self.aggressive_btn.clicked.connect(lambda: self._on_release_resources(aggressive=True))
         self.main_layout.addWidget(self.aggressive_btn)
 
+        # Top-processes popup trigger
+        self.procs_btn = QPushButton("📊", self)
+        self.procs_btn.setToolTip("Show top processes")
+        self.procs_btn.setFixedSize(24, 24)
+        self.procs_btn.setStyleSheet(btn_style)
+        self.procs_btn.clicked.connect(self.show_processes_popup)
+        self.main_layout.addWidget(self.procs_btn)
+
         self.cpu_grid = CPUBarWidget()
         self.main_layout.addWidget(self.cpu_grid)
 
-        self.scopes = {
+        self.scopes: dict[str, ScopeWidget] = {
             "cpu": ScopeWidget("CPU", "#4db8ff"),
             "ram": ScopeWidget("RAM", "#a29bfe"),
             "up": ScopeWidget("UP", "#ff7675"),
             "dn": ScopeWidget("DN", "#55efc4"),
+            "r/w": ScopeWidget("R/W", "#fdcb6e"),
         }
+        if self._gpu_available:
+            self.scopes["gpu"] = ScopeWidget("GPU", COLOR_GPU)
+            self.scopes["vram"] = ScopeWidget("VRAM", COLOR_VRAM)
+        if self._temp_available:
+            self.scopes["temp"] = ScopeWidget("TEMP", COLOR_TEMP)
+
         for scope in self.scopes.values():
             self.main_layout.addWidget(scope, 1)
 
-        # --- Right side: Countdown Timer ---
-        self.countdown_timer = CountdownTimerWidget(self)
+        # Battery (only shown when a battery is present)
+        self.battery_widget = BatteryWidget(self)
+        self.battery_widget.update_stats(get_battery())
+        if self._battery_available:
+            self.main_layout.addWidget(self.battery_widget)
+        else:
+            self.battery_widget.hide()
+
+        # Countdown timer (persists last preset)
+        self.countdown_timer = CountdownTimerWidget(self, settings=self.settings)
         self.countdown_timer.setFixedWidth(72)
         self.main_layout.addWidget(self.countdown_timer)
 
@@ -237,16 +462,31 @@ class TaskbarMonitor(QWidget):
 
         try:
             result = release_resources(aggressive=aggressive)
-            LOGGER.info("Resource release (%s): %s", "Aggressive" if aggressive else "AutoSmart", result.summary)
-            btn.setToolTip(f"Last freed: {result.ram_freed_mb:.1f} MB")
-
-            # Show system notification
+            LOGGER.info(
+                "Resource release (%s): %s",
+                "Aggressive" if aggressive else "AutoSmart", result.summary,
+            )
             mode_name = "Aggressive Clear" if aggressive else "AutoSmart Clear"
-            NotificationService.notify(mode_name, result.details)
+            tooltip = f"Last freed: {result.ram_freed_mb:.1f} MB"
+            if result.errors:
+                tooltip += f" — {len(result.errors)} error(s)"
+                # Surface the first two error strings so the user knows what went wrong
+                detail = "\n".join(result.errors[:2])
+                NotificationService.notify(
+                    f"{mode_name} (partial)",
+                    f"{result.details}\n\nIssues:\n{detail}",
+                )
+                self._last_release_error_count = len(result.errors)
+            else:
+                NotificationService.notify(mode_name, result.details)
+                self._last_release_error_count = 0
+            btn.setToolTip(tooltip)
         except OSError:
             LOGGER.exception("OS error during resource release")
-        except Exception: # pylint: disable=broad-exception-caught
+            btn.setToolTip("Release failed — see log")
+        except Exception:  # pylint: disable=broad-exception-caught
             LOGGER.exception("Resource release failed")
+            btn.setToolTip("Release failed — see log")
         finally:
             QTimer.singleShot(600, lambda: self._restore_btn(btn, old_text))
 
@@ -264,9 +504,13 @@ class TaskbarMonitor(QWidget):
     def update_stats(self) -> None:
         """Poll system stats and refresh monitor widgets."""
         try:
-            cpu = psutil.cpu_percent()
+            # Single per-CPU sample; average it for the scalar scope to avoid
+            # calling cpu_percent() twice (each call resets psutil's internal
+            # baseline, which distorts readings).
+            per_cpu = psutil.cpu_percent(percpu=True)
+            cpu = sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
             ram = psutil.virtual_memory().percent
-            self.cpu_grid.update_usage(psutil.cpu_percent(percpu=True))
+            self.cpu_grid.update_usage(per_cpu)
             self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%")
             self.scopes["ram"].update_value(ram, f"{int(ram)}%")
 
@@ -277,6 +521,33 @@ class TaskbarMonitor(QWidget):
             self.scopes["up"].update_value(up, self.format_speed(up), auto_scale=True)
             self.scopes["dn"].update_value(down, self.format_speed(down), auto_scale=True)
 
+            new_disk = psutil.disk_io_counters()
+            if new_disk and self.old_disk:
+                r_diff = new_disk.read_bytes - self.old_disk.read_bytes
+                w_diff = new_disk.write_bytes - self.old_disk.write_bytes
+                disk_rw = float(r_diff + w_diff)
+            else:
+                disk_rw = 0.0
+            self.old_disk = new_disk
+            self.scopes["r/w"].update_value(disk_rw, self.format_speed(disk_rw), auto_scale=True)
+
+            if "gpu" in self.scopes or "vram" in self.scopes or "temp" in self.scopes:
+                gpu = get_gpu_stats()
+                if "gpu" in self.scopes and gpu.util_percent is not None:
+                    self.scopes["gpu"].update_value(gpu.util_percent, f"{int(gpu.util_percent)}%")
+                if "vram" in self.scopes and gpu.vram_percent is not None:
+                    vram_pct = gpu.vram_percent
+                    self.scopes["vram"].update_value(vram_pct, f"{int(vram_pct)}%")
+                if "temp" in self.scopes:
+                    temp = get_cpu_temp()
+                    if temp is None:
+                        temp = gpu.temp_c
+                    if temp is not None:
+                        self.scopes["temp"].update_value(temp, f"{int(temp)}°C")
+
+            if self._battery_available:
+                self.battery_widget.update_stats(get_battery())
+
             # Orchestrated timer tick
             self.countdown_timer.tick()
         except (psutil.Error, RuntimeError):
@@ -284,24 +555,46 @@ class TaskbarMonitor(QWidget):
         except Exception:  # pylint: disable=broad-exception-caught
             LOGGER.exception("Unexpected error during stats update")
 
+    # ------------------------------------------------------------------
+    # Geometry & settings
+    # ------------------------------------------------------------------
+    def _resolve_screen_for_point(self, point: QPoint):
+        """Return a QScreen whose availableGeometry contains point, else primary."""
+        app = QApplication.instance()
+        if not isinstance(app, QApplication):
+            return None
+        for screen in app.screens():
+            if screen.availableGeometry().contains(point):
+                return screen
+        return app.primaryScreen()
+
     def load_geometry(self) -> None:
-        """Load saved position and size with safe defaults."""
+        """Load saved position and size with multi-monitor awareness."""
         x_pos = read_setting_int(self.settings, "pos_x", DEFAULT_POS)
         y_pos = read_setting_int(self.settings, "pos_y", DEFAULT_POS)
         width = read_setting_int(self.settings, "width", DEFAULT_WIDTH)
         height = read_setting_int(self.settings, "height", DEFAULT_HEIGHT)
 
-        if x_pos != DEFAULT_POS and y_pos != DEFAULT_POS:
-            self.move(x_pos, y_pos)
-        else:
-            screen = QApplication.primaryScreen()
+        have_saved_pos = x_pos != DEFAULT_POS and y_pos != DEFAULT_POS
+        target = QPoint(x_pos, y_pos) if have_saved_pos else QPoint()
+        screen = self._resolve_screen_for_point(target) if have_saved_pos else None
+        if have_saved_pos and screen is not None:
+            # Saved position is valid only if it overlaps a connected monitor
+            if screen.availableGeometry().contains(target):
+                self.move(x_pos, y_pos)
+            else:
+                have_saved_pos = False
+
+        if not have_saved_pos:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if isinstance(app, QApplication) else None
             if screen is None:
                 self.move(0, 0)
             else:
                 available = screen.availableGeometry()
                 self.move(
-                    available.width() - DEFAULT_FALLBACK_WIDTH,
-                    available.height() - DEFAULT_SCREEN_PAD,
+                    available.x() + available.width() - DEFAULT_FALLBACK_WIDTH,
+                    available.y() + available.height() - DEFAULT_SCREEN_PAD,
                 )
 
         if width != DEFAULT_WIDTH and height != DEFAULT_HEIGHT:
@@ -339,6 +632,9 @@ class TaskbarMonitor(QWidget):
         AutostartManager.toggle()
         self.update()
 
+    # ------------------------------------------------------------------
+    # Painting & events
+    # ------------------------------------------------------------------
     def paintEvent(self, a0: QPaintEvent | None) -> None:  # pylint: disable=invalid-name
         """Paint the translucent monitor background."""
         painter = QPainter(self)
@@ -379,7 +675,7 @@ class TaskbarMonitor(QWidget):
         """Handle mouse move for dragging/resizing."""
         if a0 is None:
             return
-            
+
         if self.m_resize:
             rect = self.geometry()
             global_point = a0.globalPosition().toPoint()
@@ -426,23 +722,38 @@ class TaskbarMonitor(QWidget):
         if a0 is not None:
             self.menu_handler.handle_event(a0)
 
+    def changeEvent(self, a0) -> None:  # pylint: disable=invalid-name
+        """Minimize into tray when the user minimizes the window."""
+        if a0 is not None and a0.type() == QEvent.Type.WindowStateChange:
+            if self.minimize_to_tray and self.isMinimized():
+                QTimer.singleShot(0, self.hide)
+        super().changeEvent(a0)
+
     def closeEvent(self, a0) -> None:  # pylint: disable=invalid-name
         """Cleanup shortcuts on close."""
         self.shortcut_service.unregister_all()
+        if self.tray is not None:
+            self.tray.hide()
         super().closeEvent(a0)
 
 
 def main() -> int:
     """Run the taskbar monitor application."""
-    logging.basicConfig(level=logging.INFO)
+    log_path = os.path.join(os.path.dirname(__file__), "taskbar_monitor.log")
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=[logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")],
+    )
     app = QApplication(sys.argv)
+    app.setQuitOnLastWindowClosed(False)  # keep running when tray-only
     psutil.cpu_percent(interval=CPU_WARMUP_INTERVAL_SECONDS)
     monitor = TaskbarMonitor()
     monitor.show()
-
-    # Apply Win32 extended styles for reliable topmost over Windows taskbar
-    monitor._apply_win32_topmost()
-
+    # Prime per-process CPU baselines lazily so startup isn't blocked iterating
+    # hundreds of processes (this only affects the first sample of the Top
+    # Processes popup, which already shows a "Loading…" placeholder).
+    QTimer.singleShot(0, prime_process_cpu)
     return app.exec()
 
 

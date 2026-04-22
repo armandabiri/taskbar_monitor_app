@@ -20,6 +20,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+gpu = [
+    "nvidia-ml-py",
+]
 dev = [
     "types-psutil",
     "pyright",

@@ -10,11 +10,19 @@ LOGGER = logging.getLogger(__name__)
 class NotificationService:
     """Helper class to show system notifications using win11toast."""
 
+    last_error: str | None = None
+
     @classmethod
-    def notify(cls, title: str, message: str) -> None:
-        """Show a native Windows 11 notification toast."""
+    def notify(cls, title: str, message: str) -> bool:
+        """Show a native Windows 11 notification toast.
+
+        Returns True on success, False on failure (with last_error populated).
+        """
         try:
-            # Adding app_id helps Windows group notifications and show them more reliably
             toast(title, message, app_id=APP_NAME)
-        except Exception:  # pylint: disable=broad-exception-caught
-            LOGGER.exception("Failed to show Windows notification via win11toast")
+            cls.last_error = None
+            return True
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            cls.last_error = f"{type(exc).__name__}: {exc}"
+            LOGGER.warning("Notification failed: %s", cls.last_error)
+            return False

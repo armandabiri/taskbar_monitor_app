@@ -2,10 +2,13 @@
 
 
 a = Analysis(
-    ['main.py'],
-    pathex=[],
+    ['src/main.py'],
+    pathex=['src'],
     binaries=[],
-    datas=[],
+    datas=[
+        ('src/assets/taskbar-monitor.svg', 'assets'),
+        ('src/assets/taskbar-monitor.ico', 'assets'),
+    ],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -35,4 +38,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='src/assets/taskbar-monitor.ico',
 )

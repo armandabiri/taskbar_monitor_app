@@ -36,6 +36,9 @@ class MonitorProtocol(Protocol):
 
     bg_opacity: int
     interval: int
+    click_through: bool
+    autohide_fullscreen: bool
+    minimize_to_tray: bool
 
     def update_opacity(self, value: int) -> None:
         """Set panel opacity."""
@@ -48,6 +51,18 @@ class MonitorProtocol(Protocol):
 
     def toggle_autostart(self) -> None:
         """Toggle autostart status."""
+
+    def set_click_through(self, enabled: bool) -> None:
+        """Enable/disable click-through mode."""
+
+    def set_autohide_fullscreen(self, enabled: bool) -> None:
+        """Enable/disable auto-hide on fullscreen foreground apps."""
+
+    def set_minimize_to_tray(self, enabled: bool) -> None:
+        """Enable/disable minimize-to-tray behavior."""
+
+    def show_processes_popup(self) -> None:
+        """Open the top-processes popup."""
 
 
 class AppMenuBuilder:
@@ -106,6 +121,38 @@ class AppMenuBuilder:
 
             action.triggered.connect(make_handler(milliseconds))
             interval_menu.addAction(action)
+
+        menu.addSeparator()
+
+        # Top-processes shortcut
+        procs_action = QAction("Show Top Processes…", parent)
+        if isinstance(parent, MonitorProtocol):
+            procs_action.triggered.connect(parent.show_processes_popup)
+        menu.addAction(procs_action)
+
+        # Click-through toggle (Ctrl+Shift+Alt+C acts as an escape hatch)
+        click_through_action = QAction("Click-Through Mode [Ctrl+Shift+Alt+C]", parent)
+        click_through_action.setCheckable(True)
+        if isinstance(parent, MonitorProtocol):
+            click_through_action.setChecked(parent.click_through)
+            click_through_action.toggled.connect(parent.set_click_through)
+        menu.addAction(click_through_action)
+
+        # Auto-hide on fullscreen toggle
+        autohide_action = QAction("Auto-Hide on Fullscreen Apps", parent)
+        autohide_action.setCheckable(True)
+        if isinstance(parent, MonitorProtocol):
+            autohide_action.setChecked(parent.autohide_fullscreen)
+            autohide_action.toggled.connect(parent.set_autohide_fullscreen)
+        menu.addAction(autohide_action)
+
+        # Minimize-to-tray toggle
+        tray_action = QAction("Minimize to Tray", parent)
+        tray_action.setCheckable(True)
+        if isinstance(parent, MonitorProtocol):
+            tray_action.setChecked(parent.minimize_to_tray)
+            tray_action.toggled.connect(parent.set_minimize_to_tray)
+        menu.addAction(tray_action)
 
         menu.addSeparator()
 

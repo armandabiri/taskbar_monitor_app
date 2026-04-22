@@ -56,6 +56,17 @@ MIN_OPACITY = 50
 MAX_OPACITY = 255
 SLIDER_WIDTH = 120
 
+# Auto-hide / click-through / tray settings (defaults)
+DEFAULT_CLICK_THROUGH = 0
+DEFAULT_AUTOHIDE_FULLSCREEN = 1
+DEFAULT_MINIMIZE_TO_TRAY = 1
+DEFAULT_LAST_PRESET_MIN = 5
+
+# GPU / temp scope colors
+COLOR_GPU = "#ff9ff3"
+COLOR_VRAM = "#81ecec"
+COLOR_TEMP = "#ffeaa7"
+
 KB = 1024
 MB = KB * KB
 PERCENT_MAX = 100.0

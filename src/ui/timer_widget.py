@@ -10,7 +10,7 @@ Features:
 
 import logging
 
-from PyQt6.QtCore import QPointF, QRectF, QTimer, Qt, pyqtSignal
+from PyQt6.QtCore import QPointF, QRectF, QSettings, QTimer, Qt, pyqtSignal
 from PyQt6.QtGui import (
     QAction,
     QColor,
@@ -43,6 +43,7 @@ TIMER_PRESETS: tuple[tuple[str, int], ...] = (
     ("10 min", 10),
     ("15 min", 15),
     ("30 min", 30),
+    ("45 min", 45),
     ("60 min", 60),
 )
 
@@ -73,11 +74,12 @@ class CountdownTimerWidget(QWidget):
     request_stop = pyqtSignal()
     request_adjust = pyqtSignal(int)
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None,
+                 settings: QSettings | None = None) -> None:
         """Initialize the countdown timer widget."""
         super().__init__(parent)
         self.setMinimumSize(TIMER_MIN_WIDTH, TIMER_MIN_HEIGHT)
-        self.setToolTip("Timer [Presets: 1-5, Stop: 0, Adjust: +/-] (Ctrl+Shift+Alt)")
+        self.setToolTip("Timer [Presets: 1-6, Stop: 0, Adjust: +/-] (Ctrl+Shift+Alt)")
 
         # Timer state
         self._remaining_seconds: int = 0
@@ -85,7 +87,15 @@ class CountdownTimerWidget(QWidget):
         self._is_alarm: bool = False
         self._overtime_seconds: int = 0
         self._flash_on: bool = False
-        self._last_preset_minutes: int = 5  # Default increment/decrement
+        self._settings = settings
+        # Load last preset from settings (default 5 min)
+        stored = 5
+        if settings is not None:
+            try:
+                stored = int(settings.value("timer/last_preset_min", 5))
+            except (TypeError, ValueError):
+                stored = 5
+        self._last_preset_minutes: int = stored
 
         # Connect thread-safe signals
         self.request_start.connect(self._handle_request_start)
@@ -110,6 +120,9 @@ class CountdownTimerWidget(QWidget):
     def _handle_request_start(self, minutes: int) -> None:
         """Handle signal to start a new countdown and track preset."""
         self._last_preset_minutes = minutes
+        if self._settings is not None:
+            self._settings.setValue("timer/last_preset_min", minutes)
+            self._settings.sync()
         self.start_countdown(minutes, orchestrated=True)
 
     def adjust_time(self, minutes: int) -> None:
