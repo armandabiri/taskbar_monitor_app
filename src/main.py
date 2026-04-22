@@ -284,9 +284,10 @@ class TaskbarMonitor(QWidget):
     def showEvent(self, a0) -> None:  # pylint: disable=invalid-name
         """Re-apply topmost every time the window becomes visible."""
         super().showEvent(a0)
-        # Deferred slightly so winId() has a real HWND on first show.
-        QTimer.singleShot(0, self._apply_win32_topmost)
-        QTimer.singleShot(50, self._enforce_topmost)
+        # Synchronous re-apply (mirrors the originally-working pattern).
+        # winId() will force HWND creation if not yet realized.
+        self._apply_win32_topmost()
+        self._enforce_topmost()
 
     # ------------------------------------------------------------------
     # Click-through toggle
@@ -303,8 +304,15 @@ class TaskbarMonitor(QWidget):
                 if enabled:
                     cur |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT
                 else:
-                    cur &= ~_WS_EX_TRANSPARENT  # keep LAYERED; removing it can cause flicker
+                    # Remove both LAYERED and TRANSPARENT — leaving LAYERED on
+                    # causes Windows 11 DWM to mis-handle topmost z-order.
+                    cur &= ~(_WS_EX_TRANSPARENT | _WS_EX_LAYERED)
                 user32.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, cur)
+                # Force topmost re-assertion so the change doesn't demote us.
+                user32.SetWindowPos(
+                    self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
+                    _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_FRAMECHANGED,
+                )
             except OSError as exc:
                 LOGGER.warning("Failed to toggle click-through: %s", exc)
         NotificationService.notify(
@@ -750,6 +758,14 @@ def main() -> int:
     psutil.cpu_percent(interval=CPU_WARMUP_INTERVAL_SECONDS)
     monitor = TaskbarMonitor()
     monitor.show()
+
+    # Belt-and-suspenders: the originally-working code applied Win32 topmost
+    # styles SYNCHRONOUSLY right after show(). Keep that call here in addition
+    # to the showEvent re-apply, so the HWND is guaranteed pinned before the
+    # event loop even spins up.
+    monitor._apply_win32_topmost()
+    monitor._enforce_topmost()
+
     # Prime per-process CPU baselines lazily so startup isn't blocked iterating
     # hundreds of processes (this only affects the first sample of the Top
     # Processes popup, which already shows a "Loading…" placeholder).
