@@ -64,6 +64,9 @@ class MonitorProtocol(Protocol):
     def show_processes_popup(self) -> None:
         """Open the top-processes popup."""
 
+    def show_clipboard_popup(self) -> None:
+        """Open the clipboard-history popup."""
+
 
 class AppMenuBuilder:
     """Builds the context menu for the TaskbarMonitor."""
@@ -129,6 +132,11 @@ class AppMenuBuilder:
         if isinstance(parent, MonitorProtocol):
             procs_action.triggered.connect(parent.show_processes_popup)
         menu.addAction(procs_action)
+
+        clipboard_action = QAction("Clipboard History…", parent)
+        if isinstance(parent, MonitorProtocol):
+            clipboard_action.triggered.connect(parent.show_clipboard_popup)
+        menu.addAction(clipboard_action)
 
         # Click-through toggle (Ctrl+Shift+Alt+C acts as an escape hatch)
         click_through_action = QAction("Click-Through Mode [Ctrl+Shift+Alt+C]", parent)

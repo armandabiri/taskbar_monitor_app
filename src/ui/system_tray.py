@@ -19,6 +19,7 @@ def build_tray(
     on_release_smart: Callable[[], None],
     on_release_aggressive: Callable[[], None],
     on_show_processes: Callable[[], None],
+    on_show_clipboard: Callable[[], None],
     get_click_through: Callable[[], bool],
     on_set_click_through: Callable[[bool], None],
 ) -> QSystemTrayIcon | None:
@@ -59,6 +60,10 @@ def build_tray(
     act_procs = QAction("Top Processes…", parent)
     act_procs.triggered.connect(lambda: on_show_processes())
     menu.addAction(act_procs)
+
+    act_clipboard = QAction("Clipboard History…", parent)
+    act_clipboard.triggered.connect(lambda: on_show_clipboard())
+    menu.addAction(act_clipboard)
 
     menu.addSeparator()
 

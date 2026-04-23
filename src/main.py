@@ -45,6 +45,7 @@ from core.config import (
     read_setting_int,
 )
 from core.theme import ThemeEngine
+from services.clipboard_history_service import ClipboardHistoryService
 from services.notification_service import NotificationService
 
 # Services
@@ -59,6 +60,7 @@ from services.system_info import (
 )
 # UI
 from ui.battery_widget import BatteryWidget
+from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.system_tray import build_tray
@@ -168,6 +170,9 @@ class TaskbarMonitor(QWidget):
 
         self.old_net = psutil.net_io_counters()
         self.old_disk = psutil.disk_io_counters()
+        self.clipboard = QApplication.clipboard()
+        self.clipboard_history = ClipboardHistoryService(self.settings)
+        self.clipboard.dataChanged.connect(self._on_clipboard_changed)
 
         self.m_drag = False
         self.m_resize = False
@@ -187,6 +192,7 @@ class TaskbarMonitor(QWidget):
         )
 
         self.process_popup: TopProcessesPopup | None = None
+        self.clipboard_popup: ClipboardHistoryPopup | None = None
         self._last_release_error_count = 0
 
         self.setup_ui()
@@ -223,6 +229,7 @@ class TaskbarMonitor(QWidget):
             on_release_smart=lambda: self._on_release_resources(aggressive=False),
             on_release_aggressive=lambda: self._on_release_resources(aggressive=True),
             on_show_processes=self.show_processes_popup,
+            on_show_clipboard=self.show_clipboard_popup,
             get_click_through=lambda: self.click_through,
             on_set_click_through=self.set_click_through,
         )
@@ -367,6 +374,25 @@ class TaskbarMonitor(QWidget):
         self.process_popup.raise_()
         self.process_popup.activateWindow()
 
+    def show_clipboard_popup(self) -> None:
+        """Open the clipboard history popup."""
+        if self.clipboard_popup is None:
+            self.clipboard_popup = ClipboardHistoryPopup(
+                self.clipboard_history,
+                self.clipboard,
+            )
+        self.clipboard_popup.refresh()
+        popup_size = self.clipboard_popup.sizeHint()
+        popup_width = max(self.clipboard_popup.width(), popup_size.width())
+        popup_height = max(self.clipboard_popup.height(), popup_size.height())
+        popup_x = self.x() + max((self.width() - popup_width) // 2, 0)
+        popup_y = max(0, self.y() - popup_height)
+        self.clipboard_popup.resize(popup_width, popup_height)
+        self.clipboard_popup.move(popup_x, popup_y)
+        self.clipboard_popup.show()
+        self.clipboard_popup.raise_()
+        self.clipboard_popup.activateWindow()
+
     # ------------------------------------------------------------------
     # UI
     # ------------------------------------------------------------------
@@ -425,6 +451,13 @@ class TaskbarMonitor(QWidget):
         self.procs_btn.setStyleSheet(btn_style)
         self.procs_btn.clicked.connect(self.show_processes_popup)
         self.main_layout.addWidget(self.procs_btn)
+
+        self.clipboard_btn = QPushButton("📋", self)
+        self.clipboard_btn.setToolTip("Clipboard history combiner")
+        self.clipboard_btn.setFixedSize(24, 24)
+        self.clipboard_btn.setStyleSheet(btn_style)
+        self.clipboard_btn.clicked.connect(self.show_clipboard_popup)
+        self.main_layout.addWidget(self.clipboard_btn)
 
         self.cpu_grid = CPUBarWidget()
         self.main_layout.addWidget(self.cpu_grid)
@@ -743,6 +776,13 @@ class TaskbarMonitor(QWidget):
         if self.tray is not None:
             self.tray.hide()
         super().closeEvent(a0)
+
+    def _on_clipboard_changed(self) -> None:
+        """Track clipboard text changes for the history popup."""
+        text = self.clipboard.text(mode=self.clipboard.Mode.Clipboard)
+        self.clipboard_history.sync_text(text)
+        if self.clipboard_popup is not None and self.clipboard_popup.isVisible():
+            self.clipboard_popup.refresh()
 
 
 def main() -> int:
