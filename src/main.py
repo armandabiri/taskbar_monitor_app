@@ -475,7 +475,7 @@ class TaskbarMonitor(QWidget):
                 "Aggressive" if aggressive else "AutoSmart", result.summary,
             )
             mode_name = "Aggressive Clear" if aggressive else "AutoSmart Clear"
-            tooltip = f"Last freed: {result.ram_freed_mb:.1f} MB"
+            tooltip = f"Last freed: {result.ram_freed_gb:.2f} GB"
             if result.errors:
                 tooltip += f" — {len(result.errors)} error(s)"
                 # Surface the first two error strings so the user knows what went wrong
