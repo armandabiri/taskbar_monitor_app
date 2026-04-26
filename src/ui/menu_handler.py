@@ -76,6 +76,9 @@ class MonitorProtocol(Protocol):
     def show_clipboard_popup(self) -> None:
         """Open the clipboard-history popup."""
 
+    def show_snapshot_manager(self) -> None:
+        """Open the process-snapshot manager dialog."""
+
     def reload_resource_profiles(self) -> None:
         """Reload smart/aggressive profile bindings from settings."""
 
@@ -149,6 +152,11 @@ class AppMenuBuilder:
         if isinstance(parent, MonitorProtocol):
             clipboard_action.triggered.connect(parent.show_clipboard_popup)
         menu.addAction(clipboard_action)
+
+        snapshot_action = QAction("Process Snapshots…", parent)
+        if isinstance(parent, MonitorProtocol):
+            snapshot_action.triggered.connect(parent.show_snapshot_manager)
+        menu.addAction(snapshot_action)
 
         # Resource cleanup submenu — profile picker + settings dialog
         if isinstance(parent, MonitorProtocol):

@@ -63,11 +63,13 @@ from services.system_info import (
     prime_process_cpu,
 )
 # UI
+from services.process_snapshot import ProcessSnapshot
 from ui.battery_widget import BatteryWidget
 from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
+from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
 from ui.widgets import CPUBarWidget, ScopeWidget
@@ -468,6 +470,17 @@ class TaskbarMonitor(QWidget):
         self.clipboard_btn.clicked.connect(self.show_clipboard_popup)
         self.main_layout.addWidget(self.clipboard_btn)
 
+        # Snapshot manager — capture the running process set for later diff/cleanup
+        self.snapshot_btn = QPushButton("📸", self)
+        self.snapshot_btn.setToolTip(
+            "Process snapshots: capture the running process list, then later "
+            "use a snapshot as a reference to clean up only what's been added since."
+        )
+        self.snapshot_btn.setFixedSize(24, 24)
+        self.snapshot_btn.setStyleSheet(btn_style)
+        self.snapshot_btn.clicked.connect(self.show_snapshot_manager)
+        self.main_layout.addWidget(self.snapshot_btn)
+
         self.cpu_grid = CPUBarWidget()
         self.main_layout.addWidget(self.cpu_grid)
 
@@ -499,6 +512,54 @@ class TaskbarMonitor(QWidget):
         self.countdown_timer = CountdownTimerWidget(self, settings=self.settings)
         self.countdown_timer.setFixedWidth(72)
         self.main_layout.addWidget(self.countdown_timer)
+
+    def show_snapshot_manager(self) -> None:
+        """Open the process-snapshot manager dialog."""
+        open_snapshot_manager(parent=self, on_clean=self._clean_using_snapshot)
+
+    def _clean_using_snapshot(self, snapshot: ProcessSnapshot) -> None:
+        """Run the kill cleanup using ``snapshot`` as the spare reference.
+
+        Anything whose (name, exe) matches a snapshot entry is spared, on top
+        of the usual visible-window / tray-icon / system protections. Uses the
+        Aggressive-button profile so kill is enabled (Nuclear by default).
+        """
+        profile = self._aggressive_profile
+        if not profile.enable_kill:
+            from PyQt6.QtWidgets import QMessageBox  # local import to avoid top-level churn
+            QMessageBox.information(
+                self, "Kill not enabled",
+                f"The current Aggressive-button profile ('{profile.name}') has kill "
+                "disabled. Switch it to Nuclear (or another kill-enabled profile) "
+                "in Resource Cleanup → Settings…",
+            )
+            return
+
+        spare_keys = frozenset(snapshot.spare_keys())
+        kill_callback = (
+            (lambda candidates: confirm_kill(self, candidates))
+            if profile.confirm_before_kill else None
+        )
+        try:
+            result = release_resources(
+                profile=profile,
+                snapshot_spare_keys=spare_keys,
+                confirm_kill=kill_callback,
+            )
+            LOGGER.info(
+                "Snapshot-driven cleanup vs '%s': %s", snapshot.name, result.summary,
+            )
+            mode_name = f"{profile.name} Clear (vs '{snapshot.name}')"
+            if result.errors:
+                detail = "\n".join(result.errors[:2])
+                NotificationService.notify(
+                    f"{mode_name} (partial)",
+                    f"{result.details}\n\nIssues:\n{detail}",
+                )
+            else:
+                NotificationService.notify(mode_name, result.details)
+        except Exception:  # pylint: disable=broad-exception-caught
+            LOGGER.exception("Snapshot-driven cleanup failed")
 
     def reload_resource_profiles(self) -> None:
         """Re-read smart/aggressive profile bindings from QSettings."""

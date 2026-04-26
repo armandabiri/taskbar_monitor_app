@@ -43,6 +43,7 @@ def release_resources(
     flush_cache: bool | None = None,
     run_gc: bool | None = None,
     confirm_kill: ConfirmKillCallback | None = None,
+    snapshot_spare_keys: frozenset[tuple[str, str]] | None = None,
 ) -> ReleaseResult:
     """Release RAM and safely throttle/terminate hot background processes.
 
@@ -94,7 +95,7 @@ def release_resources(
 
     candidates = _scan_processes(
         profile, plan, now_mono, now_wall, own_pid, own_username,
-        foreground_pid, spared_pids, result,
+        foreground_pid, spared_pids, snapshot_spare_keys or frozenset(), result,
     )
     result.candidates_considered = len(candidates)
 
@@ -166,6 +167,7 @@ def _scan_processes(
     own_username: str | None,
     foreground_pid: int | None,
     spared_pids: frozenset[int],
+    snapshot_keys: frozenset[tuple[str, str]],
     result: ReleaseResult,
 ) -> list[ProcessCandidate]:
     candidates: list[ProcessCandidate] = []
@@ -184,10 +186,19 @@ def _scan_processes(
                 continue
             if not plan.allow_recently_throttled and _TRACKER.recently_throttled(pid, now_mono, profile):
                 continue
+            # Snapshot match → spare. Match is by (name_lower, exe_lower).
+            extra_spared = spared_pids
+            if snapshot_keys:
+                key = (
+                    (info.get("name") or "").lower(),
+                    (info.get("exe") or "").lower(),
+                )
+                if key in snapshot_keys:
+                    extra_spared = frozenset(spared_pids | {pid})
             telemetry = _TRACKER.sample_process(proc, now_mono)
             candidate = _SCORER.build_candidate(
                 proc, info, telemetry, plan, now_wall,
-                foreground_pid, profile, spared_pids, own_username,
+                foreground_pid, profile, extra_spared, own_username,
             )
             if candidate is not None:
                 candidates.append(candidate)
