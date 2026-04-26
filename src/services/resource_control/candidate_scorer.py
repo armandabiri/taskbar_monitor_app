@@ -10,7 +10,6 @@ from services.resource_control.constants import (
     HOT_DISK_MB_S,
     HOT_OTHER_MB_S,
     MIN_ESTIMATED_RECLAIM_MB,
-    NEW_PROCESS_GRACE_SECONDS,
     PROTECTED_NAMES,
     PROTECTED_USERS,
     TOP_STATUS_BONUS,
@@ -20,6 +19,7 @@ from services.resource_control.constants import (
     WINDOWS_DIR,
 )
 from services.resource_control.models import ProcessCandidate, ProcessTelemetry, ResourcePlan
+from services.resource_control.profiles import ResourceProfile
 
 
 class CandidateScorer:
@@ -33,49 +33,73 @@ class CandidateScorer:
         plan: ResourcePlan,
         now_wall: float,
         foreground_pid: int | None,
+        profile: ResourceProfile,
+        spared_pids: frozenset[int] = frozenset(),
+        own_username: str | None = None,
     ) -> ProcessCandidate | None:
         pid = int(info["pid"])
         name = (info.get("name") or "").lower()
         if pid <= 4 or name in PROTECTED_NAMES:
             return None
-        if not plan.allow_foreground_trim and pid == foreground_pid:
+        is_foreground = pid == foreground_pid
+        if profile.protect_foreground and is_foreground:
             return None
-        if (info.get("username") or "").lower() in PROTECTED_USERS:
+        if not plan.allow_foreground_trim and is_foreground:
             return None
-        if (info.get("exe") or "").lower().startswith(WINDOWS_DIR):
+        username = (info.get("username") or "").lower()
+        if username in PROTECTED_USERS:
+            return None
+        exe = (info.get("exe") or "").lower()
+        if exe.startswith(WINDOWS_DIR):
             return None
         memory_info = info.get("memory_info")
         if memory_info is None:
             return None
         rss_gb = float(memory_info.rss) / GB
         age_seconds = self._get_age_seconds(info.get("create_time"), now_wall)
-        if age_seconds is not None and age_seconds < NEW_PROCESS_GRACE_SECONDS and not plan.aggressive:
+        is_spared = pid in spared_pids or is_foreground
+
+        # Kill eligibility: not spared, not protected, owned by current user.
+        # Same-user check matters because PROCESS_TERMINATE on cross-user PIDs
+        # is access-denied and would just produce noise.
+        same_user = bool(own_username and username and username == own_username.lower())
+        old_enough = (
+            age_seconds is None
+            or age_seconds >= profile.new_process_grace_seconds
+            or plan.aggressive
+        )
+        kill_eligible = (
+            profile.enable_kill and not is_spared and same_user and old_enough
+        )
+
+        if (
+            age_seconds is not None
+            and age_seconds < profile.new_process_grace_seconds
+            and not plan.aggressive
+        ):
             return None
         cpu_percent = self._effective_cpu_percent(telemetry, age_seconds)
         disk_gb_s = self._effective_disk_gb_s(telemetry, age_seconds)
         other_gb_s = self._effective_other_gb_s(telemetry, age_seconds)
-        if rss_gb < plan.trim_threshold_gb and max(cpu_percent, disk_gb_s, other_gb_s) <= 0.0:
+        max_activity = max(cpu_percent, disk_gb_s, other_gb_s)
+        if rss_gb < plan.trim_threshold_gb and max_activity <= 0.0 and not kill_eligible:
             return None
         uss_gb = self._get_uss_gb(proc)
         estimated = self._estimate_reclaimable_gb(rss_gb, uss_gb, plan.trim_threshold_gb)
-        tags = self._hot_tags(
-            proc,
-            cpu_percent,
-            disk_gb_s,
-            other_gb_s,
-            plan,
-            pid == foreground_pid,
+        tags = () if is_spared else self._hot_tags(
+            proc, cpu_percent, disk_gb_s, other_gb_s, plan, is_foreground,
         )
-        if estimated < (MIN_ESTIMATED_RECLAIM_MB / 1024.0) and rss_gb < plan.trim_threshold_gb and not tags:
+        if (
+            estimated < (MIN_ESTIMATED_RECLAIM_MB / 1024.0)
+            and rss_gb < plan.trim_threshold_gb
+            and not tags
+            and not kill_eligible
+        ):
             return None
         reclaim_score = estimated * self._coldness_score(
-            cpu_percent,
-            disk_gb_s,
-            other_gb_s,
-            info.get("status"),
-            age_seconds,
+            cpu_percent, disk_gb_s, other_gb_s, info.get("status"), age_seconds,
         )
-        if pid == foreground_pid:
+        if is_foreground:
             reclaim_score *= 0.60
         return ProcessCandidate(
             pid=pid,
@@ -90,6 +114,8 @@ class CandidateScorer:
             reclaim_score=reclaim_score,
             throttle_score=self._throttle_score(cpu_percent, disk_gb_s, other_gb_s, tags),
             throttle_tags=tags,
+            is_spared=is_spared,
+            kill_eligible=kill_eligible,
         )
 
     def select_trim_targets(self, candidates: list[ProcessCandidate], plan: ResourcePlan) -> list[ProcessCandidate]:
@@ -176,7 +202,7 @@ class CandidateScorer:
         status: str | None,
         age_seconds: float | None,
     ) -> float:
-        score = TOP_STATUS_BONUS.get(status, 1.0)
+        score = TOP_STATUS_BONUS.get(status, 1.0) if status is not None else 1.0
         if age_seconds is not None:
             score *= 0.80 if age_seconds < 300.0 else (1.05 if age_seconds > 3600.0 else 1.0)
         score *= 1.35 if cpu_percent <= 1.0 else (1.0 if cpu_percent <= WARM_CPU_PERCENT else 0.35)

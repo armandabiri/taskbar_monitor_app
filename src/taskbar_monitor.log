@@ -28,3 +28,12 @@
 2026-04-23 12:17:18,795 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
 2026-04-23 12:18:22,124 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
 2026-04-23 12:22:09,904 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-25 19:32:03,268 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-25 19:34:06,656 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-25 19:46:06,203 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-25 19:47:02,211 INFO services.resource_control.service: Resource release (Nuclear): Freed ~0.00 GB | 0 procs trimmed | 0 procs throttled | low pressure | 1 errors
+2026-04-25 19:47:02,212 INFO __main__: Resource release (Nuclear): Freed ~0.00 GB | 0 procs trimmed | 0 procs throttled | low pressure | 1 errors
+2026-04-25 19:57:03,991 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-26 00:39:24,053 INFO services.shortcut_service: Shortcut registration: 12 succeeded, 0 failed
+2026-04-26 01:02:45,388 INFO services.resource_control.service: Resource release (Aggressive): Freed ~0.00 GB | 0 procs trimmed | 0 procs throttled | low pressure | 1 errors
+2026-04-26 01:02:45,388 INFO __main__: Resource release (Aggressive): Freed ~0.00 GB | 0 procs trimmed | 0 procs throttled | low pressure | 1 errors

@@ -8,14 +8,11 @@ import psutil
 
 from services.resource_control.constants import (
     ACTIVITY_CACHE_TTL_SECONDS,
-    AGGRESSIVE_THROTTLE_COOLDOWN_SECONDS,
-    AGGRESSIVE_TRIM_COOLDOWN_SECONDS,
     GB,
     LOGICAL_CPU_COUNT,
-    SMART_THROTTLE_COOLDOWN_SECONDS,
-    SMART_TRIM_COOLDOWN_SECONDS,
 )
 from services.resource_control.models import ActivitySnapshot, ProcessTelemetry, SystemSnapshot
+from services.resource_control.profiles import ResourceProfile
 
 
 class ActivityTracker:
@@ -91,18 +88,13 @@ class ActivityTracker:
             other_bytes=other_bytes,
         )
 
-    def recently_trimmed(self, pid: int, now: float, aggressive: bool) -> bool:
-        cooldown = AGGRESSIVE_TRIM_COOLDOWN_SECONDS if aggressive else SMART_TRIM_COOLDOWN_SECONDS
+    def recently_trimmed(self, pid: int, now: float, profile: ResourceProfile) -> bool:
         trimmed_at = self._trimmed_at.get(pid)
-        return trimmed_at is not None and (now - trimmed_at) < cooldown
+        return trimmed_at is not None and (now - trimmed_at) < profile.trim_cooldown_seconds
 
-    def recently_throttled(self, pid: int, now: float, aggressive: bool) -> bool:
-        cooldown = (
-            AGGRESSIVE_THROTTLE_COOLDOWN_SECONDS
-            if aggressive else SMART_THROTTLE_COOLDOWN_SECONDS
-        )
+    def recently_throttled(self, pid: int, now: float, profile: ResourceProfile) -> bool:
         throttled_at = self._throttled_at.get(pid)
-        return throttled_at is not None and (now - throttled_at) < cooldown
+        return throttled_at is not None and (now - throttled_at) < profile.throttle_cooldown_seconds
 
     def note_trimmed(self, pid: int, now: float) -> None:
         self._trimmed_at[pid] = now

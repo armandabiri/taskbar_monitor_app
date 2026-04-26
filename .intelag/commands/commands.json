@@ -319,7 +319,7 @@
     "name": "Git: Find Large Files",
     "description": "Analyze the repository and list files larger than X MB.",
     "type": "script",
-    "expression": "python .intelag/commands/scripts/_venv_utils.py --deps git-filter-repo && {PYTHON_EXE} -m git_filter_repo --analyze --force && {PYTHON_EXE} .intelag/commands/scripts/list_large_files.py --size {MIN_SIZE_MB} --output {OUTPUT_FILE}",
+    "expression": "python .intelag/commands/scripts/_venv_utils.py --deps git-filter-repo && {PYTHON_EXE} -m git_filter_repo --analyze --force && {PYTHON_EXE} .intelag/commands/scripts/git_list_large_files.py --size {MIN_SIZE_MB} --output {OUTPUT_FILE}",
     "group": "Git",
     "shortcut": "G L",
     "variables": [

@@ -2,40 +2,64 @@
 
 from __future__ import annotations
 
+import psutil
+
 from services.resource_control.constants import (
-    AGGRESSIVE_MAX_RECLAIM_MB,
-    AGGRESSIVE_MIN_RECLAIM_MB,
-    SMART_MAX_RECLAIM_MB,
-    SMART_MIN_RECLAIM_MB,
     VERY_HOT_CPU_PERCENT,
     VERY_HOT_DISK_MB_S,
 )
-from services.resource_control.models import ProcessCandidate, ResourcePlan, SystemSnapshot, ThrottleAction
-import psutil
+from services.resource_control.models import (
+    ProcessCandidate,
+    ResourcePlan,
+    SystemSnapshot,
+    ThrottleAction,
+)
+from services.resource_control.profiles import ResourceProfile
 
 
 class ResourcePlanner:
     """Maps current system pressure to concrete reclaim and throttle actions."""
 
-    def build_plan(self, system: SystemSnapshot, trim_threshold_mb: float, aggressive: bool) -> ResourcePlan:
-        trim_threshold_gb = trim_threshold_mb / 1024.0
+    def build_plan(self, system: SystemSnapshot, profile: ResourceProfile) -> ResourcePlan:
+        aggressive = profile.aggressive
+        trim_threshold_gb = profile.trim_threshold_mb / 1024.0
         available_ratio = (system.available_gb / system.total_gb) if system.total_gb else 0.0
+
+        # Pressure tier — selects the *base* trim/throttle counts. The profile
+        # then caps these so a Gentle profile never escalates beyond its limits.
         if system.memory_percent >= 93.0 or available_ratio <= 0.06:
-            level, threshold, desired_ratio, trims, throttles, flush = "critical", 96.0, 0.16, 6, 4, True
+            level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
+                "critical", 96.0, 0.16, 6, 4, True
         elif system.memory_percent >= 88.0 or available_ratio <= 0.10:
-            level, threshold, desired_ratio, trims, throttles, flush = "high", 160.0, 0.14, 5, 3, True
+            level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
+                "high", 160.0, 0.14, 5, 3, True
         elif system.memory_percent >= 80.0 or available_ratio <= 0.16:
-            level, threshold, desired_ratio, trims, throttles, flush = "elevated", 200.0, 0.12, 4, 2, aggressive
+            level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
+                "elevated", 200.0, 0.12, 4, 2, aggressive
         else:
-            level, threshold, desired_ratio, trims, throttles, flush = "low", 256.0, 0.12, 2, 1, False
-        dynamic_threshold = (threshold / 1024.0) if aggressive else max(trim_threshold_gb, threshold / 1024.0)
-        reclaim_floor = (AGGRESSIVE_MIN_RECLAIM_MB if aggressive else SMART_MIN_RECLAIM_MB) / 1024.0
-        reclaim_cap = (AGGRESSIVE_MAX_RECLAIM_MB if aggressive else SMART_MAX_RECLAIM_MB) / 1024.0
+            level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
+                "low", 256.0, 0.12, 2, 1, False
+
+        dynamic_threshold = (
+            (base_threshold / 1024.0)
+            if aggressive
+            else max(trim_threshold_gb, base_threshold / 1024.0)
+        )
+        reclaim_floor = profile.min_reclaim_mb / 1024.0
+        reclaim_cap = profile.max_reclaim_mb / 1024.0
         desired_available_gb = system.total_gb * (0.20 if aggressive else desired_ratio)
         reclaim_target_gb = min(
             max(desired_available_gb - system.available_gb, reclaim_floor),
             reclaim_cap,
         )
+
+        # Cap actions by profile — Gentle should never trim 6 things even at critical.
+        max_trim = min(profile.max_trim_per_run, base_trims + (2 if aggressive else 0))
+        max_throttle = (
+            min(profile.max_throttle_per_run, base_throttles + (1 if aggressive else 0))
+            if profile.enable_throttle else 0
+        )
+
         return ResourcePlan(
             aggressive=aggressive,
             level=level,
@@ -43,11 +67,11 @@ class ResourcePlanner:
             reclaim_target_gb=reclaim_target_gb,
             desired_available_gb=desired_available_gb,
             should_flush_standby=flush,
-            allow_foreground_trim=aggressive,
+            allow_foreground_trim=aggressive and not profile.protect_foreground,
             allow_recently_trimmed=aggressive or level == "critical",
             allow_recently_throttled=aggressive or level == "critical",
-            max_trimmed_processes=trims + (2 if aggressive else 0),
-            max_throttled_processes=throttles + (1 if aggressive else 0),
+            max_trimmed_processes=max(max_trim, 0),
+            max_throttled_processes=max(max_throttle, 0),
             cpu_pressure=system.cpu_percent >= 80.0 or aggressive,
             disk_pressure=system.disk_gb_s >= (48.0 / 1024.0) or aggressive,
             network_pressure=system.net_gb_s >= (12.0 / 1024.0) or aggressive,

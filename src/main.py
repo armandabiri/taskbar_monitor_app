@@ -49,7 +49,11 @@ from services.clipboard_history_service import ClipboardHistoryService
 from services.notification_service import NotificationService
 
 # Services
-from services.resource_manager import release_resources
+from services.resource_manager import (
+    load_active_aggressive_profile,
+    load_active_smart_profile,
+    release_resources,
+)
 from services.shortcut_service import ShortcutService
 from services.system_info import (
     foreground_is_fullscreen,
@@ -61,6 +65,7 @@ from services.system_info import (
 # UI
 from ui.battery_widget import BatteryWidget
 from ui.clipboard_popup import ClipboardHistoryPopup
+from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.system_tray import build_tray
@@ -194,6 +199,8 @@ class TaskbarMonitor(QWidget):
         self.process_popup: TopProcessesPopup | None = None
         self.clipboard_popup: ClipboardHistoryPopup | None = None
         self._last_release_error_count = 0
+        self._smart_profile = load_active_smart_profile(self.settings)
+        self._aggressive_profile = load_active_aggressive_profile(self.settings)
 
         self.setup_ui()
 
@@ -424,20 +431,22 @@ class TaskbarMonitor(QWidget):
             }
         """
 
-        # AutoSmart Button
+        # AutoSmart Button — uses the active "smart" profile
         self.smart_btn = QPushButton("🧠", self)
         self.smart_btn.setToolTip(
-            "AutoSmart: Release memory (skips active apps) [Ctrl+Shift+Alt+Delete]"
+            f"AutoSmart ({self._smart_profile.name}): Release memory "
+            "[Ctrl+Shift+Alt+Delete]"
         )
         self.smart_btn.setFixedSize(24, 24)
         self.smart_btn.setStyleSheet(btn_style)
         self.smart_btn.clicked.connect(lambda: self._on_release_resources(aggressive=False))
         self.main_layout.addWidget(self.smart_btn)
 
-        # Aggressive Button
+        # Aggressive Button — uses the active "aggressive" profile
         self.aggressive_btn = QPushButton("⚡", self)
         self.aggressive_btn.setToolTip(
-            "Aggressive: Deep memory cleanup (all background apps) [Ctrl+Shift+Alt+Backspace]"
+            f"Aggressive ({self._aggressive_profile.name}): Deep memory cleanup "
+            "[Ctrl+Shift+Alt+Backspace]"
         )
         self.aggressive_btn.setFixedSize(24, 24)
         self.aggressive_btn.setStyleSheet(btn_style)
@@ -491,6 +500,21 @@ class TaskbarMonitor(QWidget):
         self.countdown_timer.setFixedWidth(72)
         self.main_layout.addWidget(self.countdown_timer)
 
+    def reload_resource_profiles(self) -> None:
+        """Re-read smart/aggressive profile bindings from QSettings."""
+        self._smart_profile = load_active_smart_profile(self.settings)
+        self._aggressive_profile = load_active_aggressive_profile(self.settings)
+        if self.smart_btn is not None:
+            self.smart_btn.setToolTip(
+                f"AutoSmart ({self._smart_profile.name}): Release memory "
+                "[Ctrl+Shift+Alt+Delete]"
+            )
+        if self.aggressive_btn is not None:
+            self.aggressive_btn.setToolTip(
+                f"Aggressive ({self._aggressive_profile.name}): Deep memory cleanup "
+                "[Ctrl+Shift+Alt+Backspace]"
+            )
+
     def _on_release_resources(self, aggressive: bool = False) -> None:
         """Trigger resource release and flash feedback on the calling button."""
         btn = self.aggressive_btn if aggressive else self.smart_btn
@@ -501,13 +525,19 @@ class TaskbarMonitor(QWidget):
         if app is not None:
             app.processEvents()
 
+        profile = self._aggressive_profile if aggressive else self._smart_profile
+        kill_callback = (
+            (lambda candidates: confirm_kill(self, candidates))
+            if profile.enable_kill and profile.confirm_before_kill
+            else None
+        )
         try:
-            result = release_resources(aggressive=aggressive)
+            result = release_resources(profile=profile, confirm_kill=kill_callback)
             LOGGER.info(
                 "Resource release (%s): %s",
-                "Aggressive" if aggressive else "AutoSmart", result.summary,
+                profile.name, result.summary,
             )
-            mode_name = "Aggressive Clear" if aggressive else "AutoSmart Clear"
+            mode_name = f"{profile.name} Clear"
             tooltip = f"Last freed: {result.ram_freed_gb:.2f} GB"
             if result.errors:
                 tooltip += f" — {len(result.errors)} error(s)"

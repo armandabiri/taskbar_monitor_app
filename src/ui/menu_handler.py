@@ -5,8 +5,8 @@ import os
 import sys
 from typing import Protocol, runtime_checkable
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction, QContextMenuEvent
+from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtGui import QAction, QActionGroup, QContextMenuEvent
 from PyQt6.QtWidgets import (
     QApplication,
     QLabel,
@@ -26,6 +26,14 @@ from core.config import (
     SLIDER_WIDTH,
     WINREG,
 )
+from services.resource_control import (
+    all_profiles,
+    load_active_aggressive_profile,
+    load_active_smart_profile,
+    set_active_aggressive_profile,
+    set_active_smart_profile,
+)
+from ui.resource_settings_dialog import open_resource_settings_dialog
 
 LOGGER = logging.getLogger(__name__)
 
@@ -39,6 +47,7 @@ class MonitorProtocol(Protocol):
     click_through: bool
     autohide_fullscreen: bool
     minimize_to_tray: bool
+    settings: QSettings
 
     def update_opacity(self, value: int) -> None:
         """Set panel opacity."""
@@ -66,6 +75,9 @@ class MonitorProtocol(Protocol):
 
     def show_clipboard_popup(self) -> None:
         """Open the clipboard-history popup."""
+
+    def reload_resource_profiles(self) -> None:
+        """Reload smart/aggressive profile bindings from settings."""
 
 
 class AppMenuBuilder:
@@ -138,6 +150,10 @@ class AppMenuBuilder:
             clipboard_action.triggered.connect(parent.show_clipboard_popup)
         menu.addAction(clipboard_action)
 
+        # Resource cleanup submenu — profile picker + settings dialog
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_resource_cleanup_submenu(menu, parent)
+
         # Click-through toggle (Ctrl+Shift+Alt+C acts as an escape hatch)
         click_through_action = QAction("Click-Through Mode [Ctrl+Shift+Alt+C]", parent)
         click_through_action.setCheckable(True)
@@ -182,6 +198,92 @@ class AppMenuBuilder:
         menu.addAction(quit_action)
 
         return menu
+
+
+    @staticmethod
+    def _add_resource_cleanup_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Build the 'Resource Cleanup' submenu with profile pickers + Settings.
+
+        Flat layout: profile choices live directly inside the submenu as two
+        exclusive radio groups so there's no double-nesting.
+        """
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        cleanup_menu = QMenu("Resource Cleanup", widget_parent)
+        menu.addMenu(cleanup_menu)
+
+        active_smart = load_active_smart_profile(parent.settings).name
+        active_aggressive = load_active_aggressive_profile(parent.settings).name
+        profiles = list(all_profiles(parent.settings))
+
+        AppMenuBuilder._add_profile_radio_group(
+            cleanup_menu,
+            widget_parent,
+            label="🧠  Smart button profile",
+            profiles=profiles,
+            active_name=active_smart,
+            on_pick=lambda name: _activate_profile(parent, name, aggressive=False),
+        )
+
+        cleanup_menu.addSeparator()
+
+        AppMenuBuilder._add_profile_radio_group(
+            cleanup_menu,
+            widget_parent,
+            label="⚡  Aggressive button profile",
+            profiles=profiles,
+            active_name=active_aggressive,
+            on_pick=lambda name: _activate_profile(parent, name, aggressive=True),
+        )
+
+        cleanup_menu.addSeparator()
+
+        settings_action = QAction("Settings…", widget_parent)
+        settings_action.triggered.connect(
+            lambda _checked=False: open_resource_settings_dialog(
+                parent.settings,
+                on_apply=parent.reload_resource_profiles,
+                parent=widget_parent,
+            )
+        )
+        cleanup_menu.addAction(settings_action)
+
+    @staticmethod
+    def _add_profile_radio_group(
+        cleanup_menu: QMenu,
+        widget_parent: QWidget | None,
+        *,
+        label: str,
+        profiles,
+        active_name: str,
+        on_pick,
+    ) -> None:
+        header = QAction(label, widget_parent)
+        header.setEnabled(False)
+        cleanup_menu.addAction(header)
+
+        group = QActionGroup(cleanup_menu)
+        group.setExclusive(True)
+        for profile in profiles:
+            action = QAction(f"  {profile.name}", widget_parent)
+            action.setCheckable(True)
+            action.setChecked(profile.name == active_name)
+            action.triggered.connect(_make_picker(on_pick, profile.name))
+            group.addAction(action)
+            cleanup_menu.addAction(action)
+
+
+def _make_picker(on_pick, profile_name: str):
+    def handler(_checked: bool = False) -> None:
+        on_pick(profile_name)
+    return handler
+
+
+def _activate_profile(parent: "MonitorProtocol", profile_name: str, *, aggressive: bool) -> None:
+    if aggressive:
+        set_active_aggressive_profile(parent.settings, profile_name)
+    else:
+        set_active_smart_profile(parent.settings, profile_name)
+    parent.reload_resource_profiles()
 
 
 class ContextMenuHandler:

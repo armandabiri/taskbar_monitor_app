@@ -15,7 +15,9 @@ REPORT_HEADER = "--- Git Large Files Report (threshold: %s MB) ---\n"
 
 def main() -> None:
     """Read analysis file and print/write paths above the size threshold."""
-    parser = argparse.ArgumentParser(description="List large files from git-filter-repo analysis.")
+    parser = argparse.ArgumentParser(
+        description="List large files from git-filter-repo analysis."
+    )
     parser.add_argument(
         "--size",
         type=float,
@@ -84,7 +86,9 @@ def main() -> None:
 
 def example_usage() -> None:
     """Run a minimal example for manual testing."""
-    logger.info("Example: list_large_files.py --size 10 --output .intelag/reports/large.txt")
+    logger.info(
+        "Example: git_list_large_files.py --size 10 --output .intelag/reports/large.txt"
+    )
 
 
 if __name__ == "__main__":
@@ -94,7 +98,11 @@ if __name__ == "__main__":
         if idx < len(sys.argv):
             out_path = sys.argv[idx]
             Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-            size_val = sys.argv[sys.argv.index("--size") + 1] if "--size" in sys.argv else str(DEFAULT_MIN_SIZE_MB)
+            size_val = (
+                sys.argv[sys.argv.index("--size") + 1]
+                if "--size" in sys.argv
+                else str(DEFAULT_MIN_SIZE_MB)
+            )
             with Path(out_path).open("w", encoding="utf-8") as report_file:
                 report_file.write(REPORT_HEADER % size_val)
     if "--example" in sys.argv:

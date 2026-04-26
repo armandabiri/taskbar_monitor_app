@@ -13,6 +13,9 @@ class ReleaseResult:
     trimmed_process_names: list[str] = field(default_factory=list)
     processes_throttled: int = 0
     throttled_process_names: list[str] = field(default_factory=list)
+    processes_killed: int = 0
+    killed_process_names: list[str] = field(default_factory=list)
+    kill_confirmed: bool | None = None  # None = no kill phase, True/False = user choice
     cpu_throttled: int = 0
     disk_throttled: int = 0
     network_throttled: int = 0
@@ -20,6 +23,8 @@ class ReleaseResult:
     errors: list[str] = field(default_factory=list)
     gc_collected: int = 0
     standby_flushed: bool = False
+    working_sets_emptied: bool = False
+    modified_pages_flushed: bool = False
     pressure_level: str = "low"
     reclaim_target_gb: float = 0.0
     candidates_considered: int = 0
@@ -29,11 +34,17 @@ class ReleaseResult:
         parts = [
             f"Freed ~{self.ram_freed_gb:.2f} GB",
             f"{self.processes_trimmed} procs trimmed",
-            f"{self.processes_throttled} procs throttled",
-            f"{self.pressure_level} pressure",
         ]
+        if self.processes_killed:
+            parts.append(f"{self.processes_killed} procs killed")
+        parts.append(f"{self.processes_throttled} procs throttled")
+        parts.append(f"{self.pressure_level} pressure")
         if self.standby_flushed:
-            parts.append("standby cache flushed")
+            parts.append("standby flushed")
+        if self.working_sets_emptied:
+            parts.append("WS emptied")
+        if self.modified_pages_flushed:
+            parts.append("modified flushed")
         if self.gc_collected:
             parts.append(f"GC collected {self.gc_collected}")
         if self.errors:
@@ -53,6 +64,8 @@ class ReleaseResult:
         ]
         if self.trimmed_process_names:
             lines.append(f"Trimmed: {', '.join(sorted(set(self.trimmed_process_names))[:10])}")
+        if self.killed_process_names:
+            lines.append(f"Killed: {', '.join(sorted(set(self.killed_process_names))[:10])}")
         if self.throttled_process_names:
             lines.append(f"Throttled: {', '.join(sorted(set(self.throttled_process_names))[:10])}")
         return "\n".join(lines)
@@ -121,6 +134,8 @@ class ProcessCandidate:
     reclaim_score: float
     throttle_score: float
     throttle_tags: tuple[str, ...] = ()
+    is_spared: bool = False  # has visible window or tray icon — never trim/throttle/kill
+    kill_eligible: bool = False  # not spared, not protected, owned by current user
 
 
 @dataclass

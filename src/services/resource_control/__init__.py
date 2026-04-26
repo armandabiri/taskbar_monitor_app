@@ -1,5 +1,51 @@
 """Public resource-control API."""
 
+from services.resource_control.profiles import (
+    AGGRESSIVE,
+    BALANCED,
+    BUILTIN_PRESETS,
+    DEFAULT_AGGRESSIVE_NAME,
+    DEFAULT_SMART_NAME,
+    FLUSH_ALWAYS,
+    FLUSH_CRITICAL_ONLY,
+    FLUSH_MODES,
+    FLUSH_NEVER,
+    GENTLE,
+    NUCLEAR,
+    ResourceProfile,
+    all_profiles,
+    get_preset,
+    load_active_aggressive_profile,
+    load_active_smart_profile,
+    load_profile,
+    reset_custom_profile,
+    save_custom_profile,
+    set_active_aggressive_profile,
+    set_active_smart_profile,
+)
 from services.resource_control.service import release_resources
 
-__all__ = ["release_resources"]
+__all__ = [
+    "release_resources",
+    "ResourceProfile",
+    "GENTLE",
+    "BALANCED",
+    "AGGRESSIVE",
+    "NUCLEAR",
+    "BUILTIN_PRESETS",
+    "DEFAULT_SMART_NAME",
+    "DEFAULT_AGGRESSIVE_NAME",
+    "FLUSH_NEVER",
+    "FLUSH_CRITICAL_ONLY",
+    "FLUSH_ALWAYS",
+    "FLUSH_MODES",
+    "all_profiles",
+    "get_preset",
+    "load_profile",
+    "load_active_smart_profile",
+    "load_active_aggressive_profile",
+    "set_active_smart_profile",
+    "set_active_aggressive_profile",
+    "save_custom_profile",
+    "reset_custom_profile",
+]
