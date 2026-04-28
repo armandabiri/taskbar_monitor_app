@@ -79,6 +79,9 @@ class MonitorProtocol(Protocol):
     def show_snapshot_manager(self) -> None:
         """Open the process-snapshot manager dialog."""
 
+    def show_cleanup_history(self) -> None:
+        """Open the cleanup history dialog."""
+
     def reload_resource_profiles(self) -> None:
         """Reload smart/aggressive profile bindings from settings."""
 
@@ -157,6 +160,11 @@ class AppMenuBuilder:
         if isinstance(parent, MonitorProtocol):
             snapshot_action.triggered.connect(parent.show_snapshot_manager)
         menu.addAction(snapshot_action)
+
+        cleanup_history_action = QAction("Cleanup History…", parent)
+        if isinstance(parent, MonitorProtocol):
+            cleanup_history_action.triggered.connect(parent.show_cleanup_history)
+        menu.addAction(cleanup_history_action)
 
         # Resource cleanup submenu — profile picker + settings dialog
         if isinstance(parent, MonitorProtocol):

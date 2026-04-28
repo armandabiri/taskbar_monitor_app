@@ -1,11 +1,10 @@
-"""Process snapshot manager — take, rename, delete, and clean-using-as-reference.
+"""Process snapshot manager — take, rename, delete, and launch extra-process cleanup.
 
 The dialog lists every saved snapshot. From here the user can:
   • Take a fresh snapshot (with an optional custom name).
   • Rename / delete an existing snapshot.
-  • 'Clean now' using a snapshot as the reference — everything whose
-    (name, exe) is in the snapshot is spared; everything else (subject to the
-    usual safety filters) goes through the kill confirmation dialog.
+  • 'Kill extras...' using a snapshot as the baseline — only live processes
+    that appeared after the snapshot are shown in a preview before execution.
 """
 
 from __future__ import annotations
@@ -111,8 +110,8 @@ class SnapshotManagerDialog(QDialog):
 
         hint = QLabel(
             f"Stored in: {snapshots_dir()}    •    "
-            "'Clean now' kills everything that isn't in the snapshot, "
-            "with the usual visible-window / tray protection still applied."
+            "'Kill extras...' compares the snapshot to the live system and "
+            "lets you approve only the extra processes before anything is terminated."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -173,12 +172,11 @@ class SnapshotManagerDialog(QDialog):
             open_btn.clicked.connect(lambda _checked=False, p=snap.path: self._on_open_csv(p))
             row_layout.addWidget(open_btn)
 
-            clean_btn = QPushButton("Clean now")
+            clean_btn = QPushButton("Kill extras...")
             clean_btn.setObjectName("clean")
             clean_btn.setToolTip(
-                "Run the kill cleanup using this snapshot as the reference.\n"
-                "Anything in the snapshot is spared; new processes go through "
-                "the kill confirmation dialog."
+                "Preview the extra live processes that appeared after this snapshot,\n"
+                "then approve exactly which ones to terminate."
             )
             clean_btn.clicked.connect(lambda _checked=False, p=snap.path: self._on_clean_clicked(p))
             row_layout.addWidget(clean_btn)

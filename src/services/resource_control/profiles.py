@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field, fields, replace
+from dataclasses import dataclass, fields, replace
 from typing import Iterable
 
 from PyQt6.QtCore import QSettings
@@ -66,6 +66,7 @@ class ResourceProfile:
     # tray icon, protected name/user, system dir) get terminated to free
     # their entire working set, not just trim it.
     enable_kill: bool = False
+    always_spare_names: str = ""
     spare_visible_windows: bool = True
     spare_tray_icons: bool = True
     confirm_before_kill: bool = True
@@ -78,6 +79,11 @@ class ResourceProfile:
     def with_overrides(self, **overrides) -> "ResourceProfile":
         """Return a copy with the given fields replaced."""
         return replace(self, **overrides)
+
+    def keep_list_entries(self) -> tuple[str, ...]:
+        """Return normalized app names that must always be spared."""
+        entries = [item.strip().lower() for item in self.always_spare_names.split(",")]
+        return tuple(item for item in entries if item)
 
 
 # ---------------------------------------------------------------------------

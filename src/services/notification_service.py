@@ -1,8 +1,11 @@
 """Windows notification service using win11toast."""
 
 import logging
+
 from win11toast import toast
+
 from core.config import APP_NAME
+from services.resource_control.models import ReleaseResult
 
 LOGGER = logging.getLogger(__name__)
 
@@ -26,3 +29,9 @@ class NotificationService:
             cls.last_error = f"{type(exc).__name__}: {exc}"
             LOGGER.warning("Notification failed: %s", cls.last_error)
             return False
+
+    @classmethod
+    def notify_cleanup(cls, title: str, result: ReleaseResult) -> bool:
+        """Show a cleanup-specific toast."""
+
+        return cls.notify(title, result.details)

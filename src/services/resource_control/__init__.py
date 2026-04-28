@@ -23,11 +23,17 @@ from services.resource_control.profiles import (
     set_active_aggressive_profile,
     set_active_smart_profile,
 )
-from services.resource_control.service import release_resources
+from services.resource_control.models import CleanupMode, CleanupScope, SkipReason
+from services.resource_control.service import plan_cleanup, release_resources
+from services.resource_control.snapshot_scope import SnapshotLiveDiff, diff_snapshot_to_live
 
 __all__ = [
     "release_resources",
+    "plan_cleanup",
     "ResourceProfile",
+    "CleanupMode",
+    "CleanupScope",
+    "SkipReason",
     "GENTLE",
     "BALANCED",
     "AGGRESSIVE",
@@ -48,4 +54,6 @@ __all__ = [
     "set_active_aggressive_profile",
     "save_custom_profile",
     "reset_custom_profile",
+    "diff_snapshot_to_live",
+    "SnapshotLiveDiff",
 ]

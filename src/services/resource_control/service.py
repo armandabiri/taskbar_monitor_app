@@ -11,8 +11,21 @@ from typing import Callable, Optional
 import psutil
 
 from services.resource_control.candidate_scorer import CandidateScorer
-from services.resource_control.constants import MAX_REPORTED_ERRORS
-from services.resource_control.models import ProcessCandidate, ReleaseResult
+from services.resource_control.constants import (
+    MAX_REPORTED_ERRORS,
+    PROTECTED_NAMES,
+    PROTECTED_USERS,
+    WINDOWS_DIR,
+)
+from services.resource_control.history import append_history
+from services.resource_control.models import (
+    CandidateDecision,
+    CleanupMode,
+    CleanupScope,
+    ProcessCandidate,
+    ReleaseResult,
+    SkipReason,
+)
 from services.resource_control.planner import ResourcePlanner
 from services.resource_control.profiles import (
     BALANCED,
@@ -30,8 +43,6 @@ _PLANNER = ResourcePlanner()
 _SCORER = CandidateScorer()
 _OPERATOR = WindowsProcessOperator()
 
-# Callback signature: receives the kill candidate list. Returns the filtered
-# list of candidates the user approved; or None to skip the kill phase entirely.
 ConfirmKillCallback = Callable[[list[ProcessCandidate]], Optional[list[ProcessCandidate]]]
 
 
@@ -44,22 +55,69 @@ def release_resources(
     run_gc: bool | None = None,
     confirm_kill: ConfirmKillCallback | None = None,
     snapshot_spare_keys: frozenset[tuple[str, str]] | None = None,
+    scope: CleanupScope | None = None,
 ) -> ReleaseResult:
-    """Release RAM and safely throttle/terminate hot background processes.
+    """Release RAM and safely throttle/terminate hot background processes."""
 
-    The behaviour is driven entirely by ``profile``. When ``profile`` is None,
-    the BALANCED preset is used. Legacy keyword arguments (aggressive,
-    trim_threshold_mb, flush_cache, run_gc) override the corresponding profile
-    fields and are kept for backward compatibility.
+    profile = _resolve_profile(profile, aggressive, trim_threshold_mb, flush_cache, run_gc)
+    scope = _normalize_scope(scope)
+    result = ReleaseResult(
+        mode=scope.mode,
+        profile_name=profile.name,
+        snapshot_name=scope.snapshot_name,
+        snapshot_matched_count=scope.snapshot_matched_count,
+        snapshot_identity_collisions=scope.snapshot_identity_collisions,
+    )
+    result.memory_before_gb = _sample_available_gb()
+    if profile.run_gc and scope.mode == CleanupMode.SYSTEM_RECLAIM.value:
+        result.gc_collected = gc.collect()
 
-    When ``profile.enable_kill`` is True, ``confirm_kill`` (if provided) is
-    invoked with the kill candidate list before any process is terminated.
-    Returning False from the callback skips the kill phase entirely.
-    """
+    try:
+        if scope.mode == CleanupMode.SNAPSHOT_EXTRAS.value:
+            _run_snapshot_cleanup(profile, scope, confirm_kill, result)
+        else:
+            _run_system_reclaim(
+                profile,
+                scope,
+                confirm_kill,
+                snapshot_spare_keys or frozenset(),
+                result,
+            )
+    finally:
+        result.memory_after_gb = _sample_available_gb()
+        try:
+            append_history(result)
+        except OSError:
+            LOGGER.exception("Failed to append cleanup history")
+
+    LOGGER.info(
+        "Cleanup run=%s mode=%s profile=%s: %s",
+        result.run_id,
+        result.mode,
+        profile.name,
+        result.details.replace("\n", " | "),
+    )
+    return result
+
+
+plan_cleanup = release_resources
+
+
+def _resolve_profile(
+    profile: ResourceProfile | None,
+    aggressive: bool | None,
+    trim_threshold_mb: float | None,
+    flush_cache: bool | None,
+    run_gc: bool | None,
+) -> ResourceProfile:
     profile = profile or BALANCED
-    if (aggressive is not None or trim_threshold_mb is not None
-            or flush_cache is not None or run_gc is not None):
-        overrides: dict = {}
+    if (
+        aggressive is not None
+        or trim_threshold_mb is not None
+        or flush_cache is not None
+        or run_gc is not None
+    ):
+        overrides: dict[str, object] = {}
         if aggressive is not None:
             overrides["aggressive"] = aggressive
         if trim_threshold_mb is not None:
@@ -69,10 +127,23 @@ def release_resources(
         if run_gc is not None:
             overrides["run_gc"] = run_gc
         profile = profile.with_overrides(**overrides)
+    return profile
 
-    result = ReleaseResult()
-    if profile.run_gc:
-        result.gc_collected = gc.collect()
+
+def _normalize_scope(scope: CleanupScope | None) -> CleanupScope:
+    if scope is not None:
+        return scope
+    return CleanupScope()
+
+
+def _run_system_reclaim(
+    profile: ResourceProfile,
+    scope: CleanupScope,
+    confirm_kill: ConfirmKillCallback | None,
+    snapshot_spare_keys: frozenset[tuple[str, str]],
+    result: ReleaseResult,
+) -> None:
+    del scope
     now_mono = time.monotonic()
     now_wall = time.time()
     system = _TRACKER.sample_system(now_mono)
@@ -80,46 +151,52 @@ def release_resources(
     result.pressure_level = plan.level
     result.reclaim_target_gb = plan.reclaim_target_gb
 
-    # Below threshold + not aggressive → skip the heavy per-process scan.
     if not profile.aggressive and system.memory_percent < profile.pressure_threshold_percent:
-        LOGGER.info(
-            "Resource release (%s): below pressure threshold %.0f%% — skipping scan",
-            profile.name, profile.pressure_threshold_percent,
+        result.record_skip(SkipReason.BELOW_PRESSURE_THRESHOLD)
+        result.notes.append(
+            f"System memory {system.memory_percent:.0f}% is below the configured threshold "
+            f"{profile.pressure_threshold_percent:.0f}%."
         )
-        return result
+        return
 
     own_pid = os.getpid()
     own_username = _safe_own_username()
     foreground_pid = _OPERATOR.get_foreground_pid()
-    spared_pids = _build_spare_set(profile, own_pid, foreground_pid)
+    visible_window_pids, tray_icon_pids = _collect_ui_guard_pids(profile)
 
-    candidates = _scan_processes(
-        profile, plan, now_mono, now_wall, own_pid, own_username,
-        foreground_pid, spared_pids, snapshot_spare_keys or frozenset(), result,
+    decisions = _scan_system_reclaim(
+        profile=profile,
+        plan=plan,
+        now_mono=now_mono,
+        now_wall=now_wall,
+        own_pid=own_pid,
+        own_username=own_username,
+        foreground_pid=foreground_pid,
+        visible_window_pids=visible_window_pids,
+        tray_icon_pids=tray_icon_pids,
+        snapshot_spare_keys=snapshot_spare_keys,
+        result=result,
     )
-    result.candidates_considered = len(candidates)
+    accepted = [decision.candidate for decision in decisions if decision.candidate is not None]
+    candidates = [candidate for candidate in accepted if candidate is not None]
+    result.candidates_considered = len(decisions)
+    result.kill_candidates_found = len(_select_kill_targets(candidates, profile))
 
-    # 1) Trim phase
     if profile.enable_trim:
-        for candidate in _SCORER.select_trim_targets(
-            [c for c in candidates if not c.is_spared], plan,
-        ):
+        for candidate in _SCORER.select_trim_targets(candidates, plan):
             _do_trim(candidate, now_mono, result)
 
-    # 2) Throttle phase
     if profile.enable_throttle:
-        for candidate in _SCORER.select_throttle_targets(
-            [c for c in candidates if not c.is_spared], plan,
-        ):
+        for candidate in _SCORER.select_throttle_targets(candidates, plan):
             _do_throttle(candidate, plan, now_mono, result)
 
-    # 3) Kill phase — Nuclear-tier
     if profile.enable_kill:
-        kill_targets = _select_kill_targets(candidates)
+        kill_targets = _select_kill_targets(candidates, profile)
         if kill_targets and confirm_kill is not None:
             approved = confirm_kill(kill_targets)
             if approved is None:
                 result.kill_confirmed = False
+                result.notes.append("Kill phase was cancelled by the user.")
                 kill_targets = []
             else:
                 result.kill_confirmed = True
@@ -129,7 +206,6 @@ def release_resources(
         for candidate in kill_targets:
             _do_kill(candidate, result)
 
-    # 4) System-wide reclaim (admin-only ops are best-effort and silent on failure)
     if profile.flush_modified_pages:
         try:
             result.modified_pages_flushed = _OPERATOR.flush_modified_pages()
@@ -144,21 +220,93 @@ def release_resources(
 
     if _should_flush_standby(profile, plan):
         try:
-            available_gb = psutil.virtual_memory().available / (1024 * 1024 * 1024)
+            available_gb = _sample_available_gb() or 0.0
             if profile.flush_standby == FLUSH_ALWAYS or available_gb < plan.desired_available_gb:
                 result.standby_flushed = _OPERATOR.flush_standby_cache()
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _append_error(result, f"flush_standby: {exc}")
 
-    LOGGER.info("Resource release (%s): %s", profile.name, result.summary)
-    return result
+
+def _run_snapshot_cleanup(
+    profile: ResourceProfile,
+    scope: CleanupScope,
+    confirm_kill: ConfirmKillCallback | None,
+    result: ReleaseResult,
+) -> None:
+    result.snapshot_extras_found = len(scope.candidate_pids)
+    result.snapshot_extras_selected = len(scope.target_pids)
+    result.kill_confirmed = True if scope.target_pids else None
+    result.notes.append(
+        "Snapshot cleanup ignores memory-pressure thresholds and targets only the selected extra PIDs."
+    )
+
+    if not scope.candidate_pids:
+        result.record_skip(SkipReason.SNAPSHOT_NOT_EXTRA)
+        result.notes.append("No extra live processes were found for the selected snapshot.")
+        return
+
+    foreground_pid = _OPERATOR.get_foreground_pid()
+    own_pid = os.getpid()
+    own_username = _safe_own_username()
+    keep_list = set(profile.keep_list_entries())
+    live_targets: list[ProcessCandidate] = []
+    seen_candidate_pids: set[int] = set()
+
+    for proc in psutil.process_iter(
+        ["pid", "name", "memory_info", "username", "exe", "create_time"],
+        ad_value=None,
+    ):
+        try:
+            info = proc.info
+            pid = int(info["pid"])
+            if pid not in scope.candidate_pids:
+                continue
+            seen_candidate_pids.add(pid)
+            result.candidates_considered += 1
+            if pid not in scope.target_pids:
+                result.record_skip(SkipReason.SNAPSHOT_NOT_SELECTED)
+                result.processes_skipped += 1
+                continue
+            decision = _snapshot_candidate_decision(
+                info=info,
+                own_pid=own_pid,
+                own_username=own_username,
+                foreground_pid=foreground_pid,
+                keep_list=keep_list,
+            )
+            if decision.skip_reason is not None:
+                result.record_skip(decision.skip_reason)
+                result.processes_skipped += 1
+                continue
+            if decision.candidate is not None:
+                live_targets.append(decision.candidate)
+        except (psutil.NoSuchProcess, psutil.AccessDenied):
+            result.record_skip(SkipReason.ACCESS_DENIED)
+            result.processes_skipped += 1
+
+    missing_candidates = sorted(scope.candidate_pids - seen_candidate_pids)
+    if missing_candidates:
+        result.notes.append(
+            f"{len(missing_candidates)} snapshot extra process(es) exited before execution."
+        )
+    result.kill_candidates_found = len(live_targets)
+
+    if live_targets and confirm_kill is not None:
+        approved = confirm_kill(live_targets)
+        if approved is None:
+            result.kill_confirmed = False
+            result.notes.append("Snapshot kill phase was cancelled by the user.")
+            live_targets = []
+        else:
+            live_targets = approved
+            result.snapshot_extras_selected = len(approved)
+
+    for candidate in live_targets:
+        _do_kill(candidate, result)
 
 
-# ---------------------------------------------------------------------------
-# Phases
-# ---------------------------------------------------------------------------
-
-def _scan_processes(
+def _scan_system_reclaim(
+    *,
     profile: ResourceProfile,
     plan,
     now_mono: float,
@@ -166,12 +314,15 @@ def _scan_processes(
     own_pid: int,
     own_username: str | None,
     foreground_pid: int | None,
-    spared_pids: frozenset[int],
-    snapshot_keys: frozenset[tuple[str, str]],
+    visible_window_pids: frozenset[int],
+    tray_icon_pids: frozenset[int],
+    snapshot_spare_keys: frozenset[tuple[str, str]],
     result: ReleaseResult,
-) -> list[ProcessCandidate]:
-    candidates: list[ProcessCandidate] = []
+) -> list[CandidateDecision]:
+    decisions: list[CandidateDecision] = []
     active_pids: set[int] = set()
+    keep_list = set(profile.keep_list_entries())
+
     for proc in psutil.process_iter(
         ["pid", "name", "memory_info", "create_time", "status", "username", "exe"],
         ad_value=None,
@@ -179,58 +330,147 @@ def _scan_processes(
         try:
             info = proc.info
             pid = int(info["pid"])
+            name = (info.get("name") or "").lower()
             if pid == own_pid:
+                result.record_skip(SkipReason.OWN_PROCESS)
+                result.processes_skipped += 1
                 continue
             active_pids.add(pid)
+            if snapshot_spare_keys:
+                key = (name, (info.get("exe") or "").lower())
+                if key in snapshot_spare_keys:
+                    result.record_skip(SkipReason.SNAPSHOT_BASELINE_MATCH)
+                    result.processes_skipped += 1
+                    continue
+            if _matches_keep_list(name, str(info.get("exe") or ""), keep_list):
+                result.record_skip(SkipReason.KEEP_LIST)
+                result.processes_skipped += 1
+                continue
             if not plan.allow_recently_trimmed and _TRACKER.recently_trimmed(pid, now_mono, profile):
+                result.record_skip(SkipReason.RECENTLY_TRIMMED)
+                result.processes_skipped += 1
                 continue
             if not plan.allow_recently_throttled and _TRACKER.recently_throttled(pid, now_mono, profile):
+                result.record_skip(SkipReason.RECENTLY_THROTTLED)
+                result.processes_skipped += 1
                 continue
-            # Snapshot match → spare. Match is by (name_lower, exe_lower).
-            extra_spared = spared_pids
-            if snapshot_keys:
-                key = (
-                    (info.get("name") or "").lower(),
-                    (info.get("exe") or "").lower(),
-                )
-                if key in snapshot_keys:
-                    extra_spared = frozenset(spared_pids | {pid})
             telemetry = _TRACKER.sample_process(proc, now_mono)
-            candidate = _SCORER.build_candidate(
-                proc, info, telemetry, plan, now_wall,
-                foreground_pid, profile, extra_spared, own_username,
+            decision = _SCORER.evaluate_candidate(
+                proc,
+                info,
+                telemetry,
+                plan,
+                now_wall,
+                foreground_pid,
+                profile,
+                visible_window_pids=visible_window_pids,
+                tray_icon_pids=tray_icon_pids,
+                own_username=own_username,
             )
-            if candidate is not None:
-                candidates.append(candidate)
+            decisions.append(decision)
+            if decision.skip_reason is not None:
+                result.record_skip(decision.skip_reason)
+                result.processes_skipped += 1
+            elif decision.eligible_for_kill is False and profile.enable_kill:
+                username = (info.get("username") or "").lower()
+                if own_username and username and username != own_username.lower():
+                    result.record_skip(SkipReason.DIFFERENT_USER)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
+            result.record_skip(SkipReason.ACCESS_DENIED)
             result.processes_skipped += 1
         except Exception as exc:  # pylint: disable=broad-exception-caught
             _append_error(result, f"Unexpected candidate error: {exc}")
+
     _TRACKER.prune(active_pids, now_mono)
-    return candidates
+    return decisions
 
 
-def _select_kill_targets(candidates: list[ProcessCandidate]) -> list[ProcessCandidate]:
-    """All kill-eligible candidates, sorted by RSS desc so the largest go first."""
-    eligible = [c for c in candidates if c.kill_eligible and not c.is_spared]
-    return sorted(eligible, key=lambda c: c.rss_gb, reverse=True)
+def _collect_ui_guard_pids(profile: ResourceProfile) -> tuple[frozenset[int], frozenset[int]]:
+    visible: set[int] = set()
+    tray: set[int] = set()
+    if profile.spare_visible_windows:
+        try:
+            visible = _OPERATOR.enumerate_visible_window_pids()
+        except OSError as exc:
+            LOGGER.warning("enumerate_visible_window_pids failed: %s", exc)
+    if profile.spare_tray_icons:
+        try:
+            tray = _OPERATOR.enumerate_tray_icon_pids()
+        except OSError as exc:
+            LOGGER.warning("enumerate_tray_icon_pids failed: %s", exc)
+    return frozenset(visible), frozenset(tray)
+
+
+def _snapshot_candidate_decision(
+    *,
+    info: dict,
+    own_pid: int,
+    own_username: str | None,
+    foreground_pid: int | None,
+    keep_list: set[str],
+) -> CandidateDecision:
+    pid = int(info["pid"])
+    name = (info.get("name") or "").lower()
+    exe = (info.get("exe") or "").lower()
+    username = (info.get("username") or "").lower()
+    if pid == own_pid:
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.OWN_PROCESS, "extra")
+    if pid == foreground_pid:
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.FOREGROUND_PROCESS, "extra")
+    if pid <= 4 or name in PROTECTED_NAMES:
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.PROTECTED_NAME, "extra")
+    if username in PROTECTED_USERS:
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.PROTECTED_USER, "extra")
+    if exe.startswith(WINDOWS_DIR):
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.WINDOWS_BINARY, "extra")
+    if _matches_keep_list(name, exe, keep_list):
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.KEEP_LIST, "extra")
+    if own_username and username and username != own_username.lower():
+        return CandidateDecision(pid, name, None, False, False, False, SkipReason.DIFFERENT_USER, "extra")
+
+    memory_info = info.get("memory_info")
+    rss_bytes = float(getattr(memory_info, "rss", 0)) if memory_info is not None else 0.0
+    candidate = ProcessCandidate(
+        pid=pid,
+        name=name,
+        rss_gb=rss_bytes / (1024 * 1024 * 1024),
+        uss_gb=None,
+        cpu_percent=0.0,
+        disk_gb_s=0.0,
+        other_gb_s=0.0,
+        age_seconds=None,
+        estimated_reclaim_gb=rss_bytes / (1024 * 1024 * 1024),
+        reclaim_score=rss_bytes / (1024 * 1024 * 1024),
+        throttle_score=0.0,
+        throttle_tags=(),
+        is_spared=False,
+        kill_eligible=True,
+    )
+    return CandidateDecision(pid, name, candidate, False, False, True, None, "extra")
+
+
+def _select_kill_targets(
+    candidates: list[ProcessCandidate], profile: ResourceProfile,
+) -> list[ProcessCandidate]:
+    eligible = [c for c in candidates if c.kill_eligible]
+    keep_list = set(profile.keep_list_entries())
+    filtered = [c for c in eligible if not _matches_keep_list(c.name, "", keep_list)]
+    return sorted(filtered, key=lambda c: c.rss_gb, reverse=True)
 
 
 def _do_trim(candidate: ProcessCandidate, now_mono: float, result: ReleaseResult) -> None:
     try:
         freed = _OPERATOR.trim_workingset(candidate.pid)
         result.ram_freed_gb += freed / 1024.0
-        result.processes_trimmed += 1
-        result.trimmed_process_names.append(candidate.name)
+        result.record_cleaned(candidate.pid, "trimmed", candidate.name)
         _TRACKER.note_trimmed(candidate.pid, now_mono)
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as exc:
+        result.record_skip(SkipReason.EXECUTION_FAILED)
         result.processes_skipped += 1
         _append_error(result, str(exc))
 
 
-def _do_throttle(
-    candidate: ProcessCandidate, plan, now_mono: float, result: ReleaseResult,
-) -> None:
+def _do_throttle(candidate: ProcessCandidate, plan, now_mono: float, result: ReleaseResult) -> None:
     try:
         tags = _OPERATOR.apply_throttle(
             psutil.Process(candidate.pid),
@@ -238,8 +478,7 @@ def _do_throttle(
         )
         if not tags:
             return
-        result.processes_throttled += 1
-        result.throttled_process_names.append(candidate.name)
+        result.record_cleaned(candidate.pid, "throttled", candidate.name)
         result.cpu_throttled += int("cpu" in candidate.throttle_tags and "cpu" in tags)
         result.disk_throttled += int("disk" in candidate.throttle_tags and "disk" in tags)
         result.network_throttled += int(
@@ -247,6 +486,7 @@ def _do_throttle(
         )
         _TRACKER.note_throttled(candidate.pid, now_mono)
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as exc:
+        result.record_skip(SkipReason.EXECUTION_FAILED)
         result.processes_skipped += 1
         _append_error(result, str(exc))
 
@@ -255,39 +495,24 @@ def _do_kill(candidate: ProcessCandidate, result: ReleaseResult) -> None:
     try:
         rss_gb_before = candidate.rss_gb
         if _OPERATOR.terminate_process(candidate.pid):
-            result.processes_killed += 1
-            result.killed_process_names.append(candidate.name)
-            # Killing reclaims the entire RSS, not just the trim estimate.
+            result.record_cleaned(candidate.pid, "killed", candidate.name)
             result.ram_freed_gb += rss_gb_before
+            _TRACKER.forget(candidate.pid)
         else:
+            result.record_skip(SkipReason.ACCESS_DENIED)
             result.processes_skipped += 1
     except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        result.record_skip(SkipReason.ACCESS_DENIED)
         result.processes_skipped += 1
         _append_error(result, f"kill {candidate.name}: {exc}")
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _build_spare_set(
-    profile: ResourceProfile, own_pid: int, foreground_pid: int | None,
-) -> frozenset[int]:
-    """PIDs that must never be trimmed/throttled/killed."""
-    spared: set[int] = {own_pid}
-    if foreground_pid:
-        spared.add(foreground_pid)
-    if profile.spare_visible_windows:
-        try:
-            spared.update(_OPERATOR.enumerate_visible_window_pids())
-        except OSError as exc:
-            LOGGER.warning("enumerate_visible_window_pids failed: %s", exc)
-    if profile.spare_tray_icons:
-        try:
-            spared.update(_OPERATOR.enumerate_tray_icon_pids())
-        except OSError as exc:
-            LOGGER.warning("enumerate_tray_icon_pids failed: %s", exc)
-    return frozenset(spared)
+def _matches_keep_list(name: str, exe: str, keep_list: set[str]) -> bool:
+    if not keep_list:
+        return False
+    lower_name = (name or "").lower()
+    lower_exe = os.path.basename(exe or "").lower()
+    return lower_name in keep_list or lower_exe in keep_list
 
 
 def _safe_own_username() -> str | None:
@@ -297,12 +522,19 @@ def _safe_own_username() -> str | None:
         return None
 
 
+def _sample_available_gb() -> float | None:
+    try:
+        return psutil.virtual_memory().available / (1024 * 1024 * 1024)
+    except psutil.Error:
+        return None
+
+
 def _should_flush_standby(profile: ResourceProfile, plan) -> bool:
     if profile.flush_standby == FLUSH_NEVER:
         return False
     if profile.flush_standby == FLUSH_ALWAYS:
         return True
-    return plan.should_flush_standby  # FLUSH_CRITICAL_ONLY → planner decides
+    return plan.should_flush_standby
 
 
 def _append_error(result: ReleaseResult, message: str) -> None:

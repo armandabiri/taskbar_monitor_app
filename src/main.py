@@ -43,6 +43,7 @@ from core.config import (
     MIN_WIDGET_HEIGHT,
     MIN_WIDGET_WIDTH,
     read_setting_int,
+    runtime_log_path,
 )
 from core.theme import ThemeEngine
 from services.clipboard_history_service import ClipboardHistoryService
@@ -54,6 +55,7 @@ from services.resource_manager import (
     load_active_smart_profile,
     release_resources,
 )
+from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_to_live
 from services.shortcut_service import ShortcutService
 from services.system_info import (
     foreground_is_fullscreen,
@@ -65,11 +67,14 @@ from services.system_info import (
 # UI
 from services.process_snapshot import ProcessSnapshot
 from ui.battery_widget import BatteryWidget
+from ui.cleanup_history_dialog import open_cleanup_history_dialog
+from ui.cleanup_result_dialog import open_cleanup_result_dialog
 from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.snapshot_manager_dialog import open_snapshot_manager
+from ui.snapshot_live_cleanup_dialog import select_snapshot_extra_processes
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
 from ui.widgets import CPUBarWidget, ScopeWidget
@@ -178,6 +183,8 @@ class TaskbarMonitor(QWidget):
         self.old_net = psutil.net_io_counters()
         self.old_disk = psutil.disk_io_counters()
         self.clipboard = QApplication.clipboard()
+        if self.clipboard is None:
+            raise RuntimeError("QApplication clipboard is not available")
         self.clipboard_history = ClipboardHistoryService(self.settings)
         self.clipboard.dataChanged.connect(self._on_clipboard_changed)
 
@@ -239,6 +246,8 @@ class TaskbarMonitor(QWidget):
             on_release_aggressive=lambda: self._on_release_resources(aggressive=True),
             on_show_processes=self.show_processes_popup,
             on_show_clipboard=self.show_clipboard_popup,
+            on_show_snapshots=self.show_snapshot_manager,
+            on_show_cleanup_history=self.show_cleanup_history,
             get_click_through=lambda: self.click_through,
             on_set_click_through=self.set_click_through,
         )
@@ -517,47 +526,39 @@ class TaskbarMonitor(QWidget):
         """Open the process-snapshot manager dialog."""
         open_snapshot_manager(parent=self, on_clean=self._clean_using_snapshot)
 
+    def show_cleanup_history(self) -> None:
+        """Open the cleanup history dialog."""
+        open_cleanup_history_dialog(parent=self)
+
     def _clean_using_snapshot(self, snapshot: ProcessSnapshot) -> None:
-        """Run the kill cleanup using ``snapshot`` as the spare reference.
-
-        Anything whose (name, exe) matches a snapshot entry is spared, on top
-        of the usual visible-window / tray-icon / system protections. Uses the
-        Aggressive-button profile so kill is enabled (Nuclear by default).
-        """
+        """Preview and kill only the extra processes that appeared after a snapshot."""
         profile = self._aggressive_profile
-        if not profile.enable_kill:
-            from PyQt6.QtWidgets import QMessageBox  # local import to avoid top-level churn
-            QMessageBox.information(
-                self, "Kill not enabled",
-                f"The current Aggressive-button profile ('{profile.name}') has kill "
-                "disabled. Switch it to Nuclear (or another kill-enabled profile) "
-                "in Resource Cleanup → Settings…",
-            )
-            return
-
-        spare_keys = frozenset(snapshot.spare_keys())
-        kill_callback = (
-            (lambda candidates: confirm_kill(self, candidates))
-            if profile.confirm_before_kill else None
-        )
         try:
+            diff = diff_snapshot_to_live(snapshot)
+            selected_pids = select_snapshot_extra_processes(
+                self.settings,
+                diff,
+                parent=self,
+            )
+            if selected_pids is None:
+                return
+            scope = CleanupScope(
+                mode=CleanupMode.SNAPSHOT_EXTRAS.value,
+                snapshot_name=snapshot.name,
+                candidate_pids=frozenset(extra.pid for extra in diff.extra_processes),
+                target_pids=frozenset(selected_pids),
+                snapshot_matched_count=diff.matched_count,
+                snapshot_identity_collisions=diff.identity_collisions,
+            )
             result = release_resources(
                 profile=profile,
-                snapshot_spare_keys=spare_keys,
-                confirm_kill=kill_callback,
+                scope=scope,
             )
             LOGGER.info(
                 "Snapshot-driven cleanup vs '%s': %s", snapshot.name, result.summary,
             )
             mode_name = f"{profile.name} Clear (vs '{snapshot.name}')"
-            if result.errors:
-                detail = "\n".join(result.errors[:2])
-                NotificationService.notify(
-                    f"{mode_name} (partial)",
-                    f"{result.details}\n\nIssues:\n{detail}",
-                )
-            else:
-                NotificationService.notify(mode_name, result.details)
+            self._present_cleanup_result(mode_name, result)
         except Exception:  # pylint: disable=broad-exception-caught
             LOGGER.exception("Snapshot-driven cleanup failed")
 
@@ -588,7 +589,14 @@ class TaskbarMonitor(QWidget):
 
         profile = self._aggressive_profile if aggressive else self._smart_profile
         kill_callback = (
-            (lambda candidates: confirm_kill(self, candidates))
+            (
+                lambda candidates: confirm_kill(
+                    self,
+                    candidates,
+                    title=f"Confirm {profile.name} Cleanup",
+                    warning_prefix="background",
+                )
+            )
             if profile.enable_kill and profile.confirm_before_kill
             else None
         )
@@ -602,16 +610,10 @@ class TaskbarMonitor(QWidget):
             tooltip = f"Last freed: {result.ram_freed_gb:.2f} GB"
             if result.errors:
                 tooltip += f" — {len(result.errors)} error(s)"
-                # Surface the first two error strings so the user knows what went wrong
-                detail = "\n".join(result.errors[:2])
-                NotificationService.notify(
-                    f"{mode_name} (partial)",
-                    f"{result.details}\n\nIssues:\n{detail}",
-                )
                 self._last_release_error_count = len(result.errors)
             else:
-                NotificationService.notify(mode_name, result.details)
                 self._last_release_error_count = 0
+            self._present_cleanup_result(mode_name, result)
             btn.setToolTip(tooltip)
         except OSError:
             LOGGER.exception("OS error during resource release")
@@ -621,6 +623,15 @@ class TaskbarMonitor(QWidget):
             btn.setToolTip("Release failed — see log")
         finally:
             QTimer.singleShot(600, lambda: self._restore_btn(btn, old_text))
+
+    def _present_cleanup_result(self, mode_name: str, result) -> None:
+        """Show the cleanup toast and open diagnostics when needed."""
+        NotificationService.notify_cleanup(mode_name, result)
+        if result.errors or result.processes_cleaned_total == 0:
+            title = f"{mode_name} Result"
+            if result.errors:
+                title = f"{mode_name} Result (partial)"
+            open_cleanup_result_dialog(result, title=title, parent=self)
 
     def _restore_btn(self, btn: QPushButton, text: str) -> None:
         """Restore the release button state."""
@@ -878,11 +889,10 @@ class TaskbarMonitor(QWidget):
 
 def main() -> int:
     """Run the taskbar monitor application."""
-    log_path = os.path.join(os.path.dirname(__file__), "taskbar_monitor.log")
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(log_path, encoding="utf-8")],
+        handlers=[logging.StreamHandler(), logging.FileHandler(runtime_log_path(), encoding="utf-8")],
     )
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # keep running when tray-only

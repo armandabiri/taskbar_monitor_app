@@ -3,6 +3,9 @@
 
 Write-Host "--- Starting Taskbar Monitor Build Process ---" -ForegroundColor Cyan
 
+$distPath = ".\dist_pyinstaller"
+$workPath = ".\build_pyinstaller"
+
 # 1. Activate virtualenv if present
 if (Test-Path ".\.venv\Scripts\Activate.ps1") {
     Write-Host "[1/5] Activating Virtual Environment..." -ForegroundColor Yellow
@@ -13,8 +16,8 @@ else {
 }
 
 # 2. Ensure dependencies
-Write-Host "[2/5] Verifying dependencies (PyInstaller, psutil, PyQt6)..." -ForegroundColor Yellow
-pip install -q pyinstaller psutil PyQt6
+Write-Host "[2/5] Verifying dependencies (editable app install + PyInstaller)..." -ForegroundColor Yellow
+pip install -q -e . pyinstaller
 
 # 3. Regenerate the .ico from the SVG so the EXE picks up the latest icon
 Write-Host "[3/5] Building .ico from SVG..." -ForegroundColor Yellow
@@ -24,17 +27,17 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-# 4. Clean previous builds
-if (Test-Path ".\dist") { Remove-Item -Recurse -Force ".\dist" }
-if (Test-Path ".\build") { Remove-Item -Recurse -Force ".\build" }
+# 4. Clean previous isolated builds
+if (Test-Path $distPath) { Remove-Item -Recurse -Force $distPath }
+if (Test-Path $workPath) { Remove-Item -Recurse -Force $workPath }
 
 # 5. Run PyInstaller using the spec (keeps icon + bundled assets in sync)
 Write-Host "[4/5] Compiling to Standalone Executable..." -ForegroundColor Yellow
-pyinstaller --clean --noconfirm TaskbarMonitor.spec
+python -m PyInstaller --clean --noconfirm --distpath $distPath --workpath $workPath TaskbarMonitor.spec
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "[5/5] Build Successful!" -ForegroundColor Green
-    Write-Host "Executable located in: $(Get-Location)\dist\TaskbarMonitor.exe" -ForegroundColor Cyan
+    Write-Host "Executable located in: $(Get-Location)\dist_pyinstaller\TaskbarMonitor.exe" -ForegroundColor Cyan
 }
 else {
     Write-Host "[!] Build Failed. Check the error log above." -ForegroundColor Red

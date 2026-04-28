@@ -66,7 +66,12 @@ _LIKELY_TRAY_APPS = frozenset(
 
 
 def confirm_kill(
-    parent: QWidget | None, candidates: Iterable[ProcessCandidate],
+    parent: QWidget | None,
+    candidates: Iterable[ProcessCandidate],
+    *,
+    title: str = "Confirm Cleanup",
+    warning_prefix: str = "background",
+    info_text: str | None = None,
 ) -> list[ProcessCandidate] | None:
     """Modal dialog with per-row checkboxes.
 
@@ -79,7 +84,7 @@ def confirm_kill(
         return None
 
     dialog = QDialog(parent)
-    dialog.setWindowTitle("Confirm Nuclear Cleanup")
+    dialog.setWindowTitle(title)
     dialog.setStyleSheet(_DIALOG_STYLE)
     dialog.setMinimumSize(620, 540)
 
@@ -88,15 +93,18 @@ def confirm_kill(
     layout.setSpacing(10)
 
     warning = QLabel(
-        f"⚠ {len(targets)} background process(es) will be terminated."
+        f"⚠ {len(targets)} {warning_prefix} process(es) will be terminated."
     )
     warning.setObjectName("warning")
     layout.addWidget(warning)
 
     info = QLabel(
-        "Visible windows are already spared. Uncheck any row to spare it now. "
-        "Likely tray apps are unchecked by default — check them only if you "
-        "really want to kill them. Unsaved data in killed apps will be lost."
+        info_text
+        or (
+            "Visible windows are already spared. Uncheck any row to spare it now. "
+            "Likely tray apps are unchecked by default — check them only if you "
+            "really want to kill them. Unsaved data in killed apps will be lost."
+        )
     )
     info.setWordWrap(True)
     layout.addWidget(info)

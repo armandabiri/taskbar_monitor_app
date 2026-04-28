@@ -18,6 +18,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -211,6 +212,13 @@ class ResourceSettingsDialog(QDialog):
         )
         form.addRow("", self._confirm_kill)
 
+        self._keep_list = QLineEdit()
+        self._keep_list.setPlaceholderText("e.g. discord.exe, slack.exe, obs64.exe")
+        self._keep_list.setToolTip(
+            "Comma-separated process names or executable basenames that must never be killed."
+        )
+        form.addRow("Keep-list:", self._keep_list)
+
         # --- System-wide reclaim (admin only) -------------------------------
         self._empty_ws = QCheckBox("Empty all working sets system-wide (admin only)")
         self._empty_ws.setToolTip(
@@ -293,6 +301,7 @@ class ResourceSettingsDialog(QDialog):
             self._grace.setValue(int(profile.new_process_grace_seconds))
             self._run_gc.setChecked(profile.run_gc)
             self._enable_kill.setChecked(profile.enable_kill)
+            self._keep_list.setText(profile.always_spare_names)
             self._spare_visible.setChecked(profile.spare_visible_windows)
             self._spare_tray.setChecked(profile.spare_tray_icons)
             self._confirm_kill.setChecked(profile.confirm_before_kill)
@@ -319,6 +328,7 @@ class ResourceSettingsDialog(QDialog):
             new_process_grace_seconds=float(self._grace.value()),
             run_gc=self._run_gc.isChecked(),
             enable_kill=self._enable_kill.isChecked(),
+            always_spare_names=self._keep_list.text().strip(),
             spare_visible_windows=self._spare_visible.isChecked(),
             spare_tray_icons=self._spare_tray.isChecked(),
             confirm_before_kill=self._confirm_kill.isChecked(),

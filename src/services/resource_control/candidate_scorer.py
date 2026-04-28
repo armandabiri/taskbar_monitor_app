@@ -18,14 +18,20 @@ from services.resource_control.constants import (
     WARM_OTHER_MB_S,
     WINDOWS_DIR,
 )
-from services.resource_control.models import ProcessCandidate, ProcessTelemetry, ResourcePlan
+from services.resource_control.models import (
+    CandidateDecision,
+    ProcessCandidate,
+    ProcessTelemetry,
+    ResourcePlan,
+    SkipReason,
+)
 from services.resource_control.profiles import ResourceProfile
 
 
 class CandidateScorer:
     """Builds ranked process candidates from raw telemetry."""
 
-    def build_candidate(
+    def evaluate_candidate(
         self,
         proc: psutil.Process,
         info: dict,
@@ -34,74 +40,87 @@ class CandidateScorer:
         now_wall: float,
         foreground_pid: int | None,
         profile: ResourceProfile,
-        spared_pids: frozenset[int] = frozenset(),
+        *,
+        visible_window_pids: frozenset[int] = frozenset(),
+        tray_icon_pids: frozenset[int] = frozenset(),
         own_username: str | None = None,
-    ) -> ProcessCandidate | None:
+    ) -> CandidateDecision:
         pid = int(info["pid"])
         name = (info.get("name") or "").lower()
         if pid <= 4 or name in PROTECTED_NAMES:
-            return None
+            return self._skip(pid, name, SkipReason.PROTECTED_NAME)
+
         is_foreground = pid == foreground_pid
         if profile.protect_foreground and is_foreground:
-            return None
+            return self._skip(pid, name, SkipReason.FOREGROUND_PROCESS)
         if not plan.allow_foreground_trim and is_foreground:
-            return None
+            return self._skip(pid, name, SkipReason.FOREGROUND_PROCESS)
+
         username = (info.get("username") or "").lower()
         if username in PROTECTED_USERS:
-            return None
+            return self._skip(pid, name, SkipReason.PROTECTED_USER)
+
         exe = (info.get("exe") or "").lower()
         if exe.startswith(WINDOWS_DIR):
-            return None
+            return self._skip(pid, name, SkipReason.WINDOWS_BINARY)
+
+        if pid in visible_window_pids:
+            return self._skip(pid, name, SkipReason.VISIBLE_WINDOW)
+        if pid in tray_icon_pids:
+            return self._skip(pid, name, SkipReason.TRAY_ICON)
+
         memory_info = info.get("memory_info")
         if memory_info is None:
-            return None
+            return self._skip(pid, name, SkipReason.NO_RECLAIM_VALUE)
+
         rss_gb = float(memory_info.rss) / GB
         age_seconds = self._get_age_seconds(info.get("create_time"), now_wall)
-        is_spared = pid in spared_pids or is_foreground
-
-        # Kill eligibility: not spared, not protected, owned by current user.
-        # Same-user check matters because PROCESS_TERMINATE on cross-user PIDs
-        # is access-denied and would just produce noise.
         same_user = bool(own_username and username and username == own_username.lower())
-        old_enough = (
-            age_seconds is None
-            or age_seconds >= profile.new_process_grace_seconds
-            or plan.aggressive
-        )
-        kill_eligible = (
-            profile.enable_kill and not is_spared and same_user and old_enough
-        )
 
         if (
             age_seconds is not None
             and age_seconds < profile.new_process_grace_seconds
             and not plan.aggressive
         ):
-            return None
+            return self._skip(pid, name, SkipReason.NEW_PROCESS_GRACE)
+
         cpu_percent = self._effective_cpu_percent(telemetry, age_seconds)
         disk_gb_s = self._effective_disk_gb_s(telemetry, age_seconds)
         other_gb_s = self._effective_other_gb_s(telemetry, age_seconds)
         max_activity = max(cpu_percent, disk_gb_s, other_gb_s)
-        if rss_gb < plan.trim_threshold_gb and max_activity <= 0.0 and not kill_eligible:
-            return None
         uss_gb = self._get_uss_gb(proc)
         estimated = self._estimate_reclaimable_gb(rss_gb, uss_gb, plan.trim_threshold_gb)
-        tags = () if is_spared else self._hot_tags(
-            proc, cpu_percent, disk_gb_s, other_gb_s, plan, is_foreground,
+        tags = self._hot_tags(proc, cpu_percent, disk_gb_s, other_gb_s, plan, is_foreground)
+        kill_eligible = bool(
+            profile.enable_kill
+            and same_user
+            and (
+                age_seconds is None
+                or age_seconds >= profile.new_process_grace_seconds
+                or plan.aggressive
+            )
         )
+
+        if rss_gb < plan.trim_threshold_gb and max_activity <= 0.0 and not kill_eligible:
+            return self._skip(pid, name, SkipReason.BELOW_TRIM_THRESHOLD)
         if (
             estimated < (MIN_ESTIMATED_RECLAIM_MB / 1024.0)
             and rss_gb < plan.trim_threshold_gb
             and not tags
             and not kill_eligible
         ):
-            return None
+            return self._skip(pid, name, SkipReason.NO_RECLAIM_VALUE)
+
         reclaim_score = estimated * self._coldness_score(
-            cpu_percent, disk_gb_s, other_gb_s, info.get("status"), age_seconds,
+            cpu_percent,
+            disk_gb_s,
+            other_gb_s,
+            info.get("status"),
+            age_seconds,
         )
         if is_foreground:
             reclaim_score *= 0.60
-        return ProcessCandidate(
+        candidate = ProcessCandidate(
             pid=pid,
             name=name,
             rss_gb=rss_gb,
@@ -114,11 +133,21 @@ class CandidateScorer:
             reclaim_score=reclaim_score,
             throttle_score=self._throttle_score(cpu_percent, disk_gb_s, other_gb_s, tags),
             throttle_tags=tags,
-            is_spared=is_spared,
+            is_spared=False,
             kill_eligible=kill_eligible,
         )
+        return CandidateDecision(
+            pid=pid,
+            name=name,
+            candidate=candidate,
+            eligible_for_trim=True,
+            eligible_for_throttle=bool(tags),
+            eligible_for_kill=kill_eligible,
+        )
 
-    def select_trim_targets(self, candidates: list[ProcessCandidate], plan: ResourcePlan) -> list[ProcessCandidate]:
+    def select_trim_targets(
+        self, candidates: list[ProcessCandidate], plan: ResourcePlan,
+    ) -> list[ProcessCandidate]:
         selected: list[ProcessCandidate] = []
         estimated_total = 0.0
         for candidate in sorted(candidates, key=lambda item: item.reclaim_score, reverse=True):
@@ -130,9 +159,22 @@ class CandidateScorer:
                 break
         return selected
 
-    def select_throttle_targets(self, candidates: list[ProcessCandidate], plan: ResourcePlan) -> list[ProcessCandidate]:
+    def select_throttle_targets(
+        self, candidates: list[ProcessCandidate], plan: ResourcePlan,
+    ) -> list[ProcessCandidate]:
         hot = [item for item in candidates if item.throttle_tags]
         return sorted(hot, key=lambda item: item.throttle_score, reverse=True)[:plan.max_throttled_processes]
+
+    def _skip(self, pid: int, name: str, reason: SkipReason) -> CandidateDecision:
+        return CandidateDecision(
+            pid=pid,
+            name=name,
+            candidate=None,
+            eligible_for_trim=False,
+            eligible_for_throttle=False,
+            eligible_for_kill=False,
+            skip_reason=reason,
+        )
 
     def _hot_tags(
         self,
@@ -150,7 +192,11 @@ class CandidateScorer:
             tags.append("cpu")
         if plan.disk_pressure and disk_gb_s >= (HOT_DISK_MB_S / 1024.0):
             tags.append("disk")
-        if plan.network_pressure and other_gb_s >= (HOT_OTHER_MB_S / 1024.0) and self._has_connections(proc):
+        if (
+            plan.network_pressure
+            and other_gb_s >= (HOT_OTHER_MB_S / 1024.0)
+            and self._has_connections(proc)
+        ):
             tags.append("network")
         return tuple(tags)
 
@@ -171,24 +217,32 @@ class CandidateScorer:
         uss = getattr(full_info, "uss", None)
         return None if uss is None else float(uss) / GB
 
-    def _effective_cpu_percent(self, telemetry: ProcessTelemetry, age_seconds: float | None) -> float:
+    def _effective_cpu_percent(
+        self, telemetry: ProcessTelemetry, age_seconds: float | None,
+    ) -> float:
         if telemetry.cpu_percent is not None:
             return telemetry.cpu_percent
         cpus = max(psutil.cpu_count() or 1, 1)
         return 0.0 if not age_seconds else (telemetry.total_cpu_time / age_seconds / cpus) * 100.0
 
-    def _effective_disk_gb_s(self, telemetry: ProcessTelemetry, age_seconds: float | None) -> float:
+    def _effective_disk_gb_s(
+        self, telemetry: ProcessTelemetry, age_seconds: float | None,
+    ) -> float:
         total = telemetry.read_bytes + telemetry.write_bytes
         if telemetry.disk_gb_s > 0.0:
             return telemetry.disk_gb_s
         return 0.0 if not age_seconds else float(total) / age_seconds / GB
 
-    def _effective_other_gb_s(self, telemetry: ProcessTelemetry, age_seconds: float | None) -> float:
+    def _effective_other_gb_s(
+        self, telemetry: ProcessTelemetry, age_seconds: float | None,
+    ) -> float:
         if telemetry.other_gb_s > 0.0:
             return telemetry.other_gb_s
         return 0.0 if not age_seconds else float(telemetry.other_bytes) / age_seconds / GB
 
-    def _estimate_reclaimable_gb(self, rss_gb: float, uss_gb: float | None, trim_threshold_gb: float) -> float:
+    def _estimate_reclaimable_gb(
+        self, rss_gb: float, uss_gb: float | None, trim_threshold_gb: float,
+    ) -> float:
         private_gb = uss_gb if uss_gb is not None and uss_gb > 0.0 else (rss_gb * 0.50)
         excess_gb = max(rss_gb - (trim_threshold_gb * 0.65), 0.0)
         estimate = min(rss_gb * 0.55, private_gb * 0.75)
@@ -206,8 +260,12 @@ class CandidateScorer:
         if age_seconds is not None:
             score *= 0.80 if age_seconds < 300.0 else (1.05 if age_seconds > 3600.0 else 1.0)
         score *= 1.35 if cpu_percent <= 1.0 else (1.0 if cpu_percent <= WARM_CPU_PERCENT else 0.35)
-        score *= 1.15 if disk_gb_s <= (1.0 / 1024.0) else (1.0 if disk_gb_s <= (WARM_DISK_MB_S / 1024.0) else 0.40)
-        score *= 1.10 if other_gb_s <= (0.5 / 1024.0) else (1.0 if other_gb_s <= (WARM_OTHER_MB_S / 1024.0) else 0.45)
+        score *= 1.15 if disk_gb_s <= (1.0 / 1024.0) else (
+            1.0 if disk_gb_s <= (WARM_DISK_MB_S / 1024.0) else 0.40
+        )
+        score *= 1.10 if other_gb_s <= (0.5 / 1024.0) else (
+            1.0 if other_gb_s <= (WARM_OTHER_MB_S / 1024.0) else 0.45
+        )
         return max(score, 0.10)
 
     def _throttle_score(

@@ -102,6 +102,12 @@ class ActivityTracker:
     def note_throttled(self, pid: int, now: float) -> None:
         self._throttled_at[pid] = now
 
+    def forget(self, pid: int) -> None:
+        """Drop all cached state for a PID that is gone."""
+        self._process_activity.pop(pid, None)
+        self._trimmed_at.pop(pid, None)
+        self._throttled_at.pop(pid, None)
+
     def prune(self, active_pids: set[int], now: float) -> None:
         for pid, sample in list(self._process_activity.items()):
             if pid not in active_pids or (now - sample.sampled_at) > ACTIVITY_CACHE_TTL_SECONDS:

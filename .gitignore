@@ -1,2 +1,7 @@
 build/
 dist/
+build_pyinstaller/
+dist_pyinstaller/
+__pycache__/
+*.pyc
+*.egg-info/

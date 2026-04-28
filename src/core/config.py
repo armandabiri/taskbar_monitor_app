@@ -1,8 +1,12 @@
 """Global configuration and settings for TaskbarMonitor."""
 
+from __future__ import annotations
+
 import logging
+import os
 from types import ModuleType
-from PyQt6.QtCore import QSettings
+
+from PyQt6.QtCore import QSettings, QStandardPaths
 
 try:
     import winreg as _winreg
@@ -61,6 +65,10 @@ DEFAULT_CLICK_THROUGH = 0
 DEFAULT_AUTOHIDE_FULLSCREEN = 1
 DEFAULT_MINIMIZE_TO_TRAY = 1
 DEFAULT_LAST_PRESET_MIN = 5
+DEFAULT_SNAPSHOT_PRESELECT_BACKGROUND_ONLY = 1
+DEFAULT_SNAPSHOT_SHOW_VISIBLE_EXTRAS = 1
+DEFAULT_SNAPSHOT_SHOW_TRAY_EXTRAS = 1
+DEFAULT_CLEANUP_HISTORY_RETENTION = 200
 
 # GPU / temp scope colors
 COLOR_GPU = "#ff9ff3"
@@ -80,6 +88,32 @@ INTERVAL_OPTIONS: tuple[tuple[str, int], ...] = (
     ("2.0s (Slow)", 2000),
     ("5.0s (Eco)", 5000),
 )
+
+
+def app_data_dir() -> str:
+    """Return the writable application data directory."""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
+    if not base:
+        base = os.path.expanduser("~/.taskbar-monitor")
+    os.makedirs(base, exist_ok=True)
+    return base
+
+
+def runtime_log_path() -> str:
+    """Return the writable log path used at runtime."""
+    return os.path.join(app_data_dir(), "taskbar_monitor.log")
+
+
+def cleanup_history_path() -> str:
+    """Return the writable cleanup-history file path."""
+    return os.path.join(app_data_dir(), "cleanup_history.jsonl")
+
+
+def snapshots_root_dir() -> str:
+    """Return the writable snapshot directory."""
+    target = os.path.join(app_data_dir(), "snapshots")
+    os.makedirs(target, exist_ok=True)
+    return target
 
 
 def read_setting_int(settings: QSettings, key: str, default: int) -> int:

@@ -25,6 +25,9 @@ gpu = [
 ]
 dev = [
     "types-psutil",
+    "pytest",
+    "pytest-qt",
+    "mypy",
     "pyright",
     "ruff",
     "pylint",

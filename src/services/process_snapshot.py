@@ -16,11 +16,13 @@ import logging
 import os
 import re
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Iterable
 
 import psutil
-from PyQt6.QtCore import QStandardPaths
+
+from core.config import snapshots_root_dir
 
 LOGGER = logging.getLogger(__name__)
 
@@ -70,12 +72,7 @@ class ProcessSnapshot:
 
 def snapshots_dir() -> str:
     """Directory where snapshot CSVs are stored. Created on first call."""
-    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.AppDataLocation)
-    if not base:
-        base = os.path.expanduser("~/.taskbar-monitor")
-    target = os.path.join(base, "snapshots")
-    os.makedirs(target, exist_ok=True)
-    return target
+    return snapshots_root_dir()
 
 
 def sanitize_name(name: str) -> str:
@@ -85,6 +82,43 @@ def sanitize_name(name: str) -> str:
 
 
 CPU_SAMPLE_INTERVAL_SECONDS = 0.5
+
+
+def normalize_process_text(value: str | None) -> str:
+    """Return a normalized comparison token for process metadata."""
+    return " ".join((value or "").strip().lower().split())
+
+
+def build_process_identity(
+    name: str | None,
+    exe: str | None,
+    username: str | None,
+    cmdline: str | None,
+) -> tuple[str, str, str, str]:
+    """Build a stable identity tuple for snapshot/live process matching."""
+    return (
+        normalize_process_text(name),
+        normalize_process_text(exe),
+        normalize_process_text(username),
+        normalize_process_text(cmdline),
+    )
+
+
+def build_entry_identity(entry: ProcessSnapshotEntry) -> tuple[str, str, str, str]:
+    """Build a comparison identity for a snapshot row."""
+    return build_process_identity(entry.name, entry.exe, entry.username, entry.cmdline)
+
+
+def build_live_process_identity(proc: psutil.Process) -> tuple[str, str, str, str]:
+    """Build a comparison identity for a live process."""
+    info = getattr(proc, "info", None) or {}
+    name = info.get("name")
+    exe = info.get("exe")
+    username = info.get("username")
+    cmdline = info.get("cmdline")
+    if isinstance(cmdline, list):
+        cmdline = " ".join(str(part) for part in cmdline)
+    return build_process_identity(name, exe, username, str(cmdline or ""))
 
 
 def take_snapshot(name: str | None = None) -> ProcessSnapshot:
@@ -417,16 +451,17 @@ def diff_against_live(
 
     These are the 'new since snapshot' set — the smart-kill targets.
     """
-    keys = snapshot.spare_keys()
+    snapshot_identities = Counter(build_entry_identity(entry) for entry in snapshot.entries)
     if live_processes is None:
-        live_processes = psutil.process_iter(["name", "exe"], ad_value=None)
+        live_processes = psutil.process_iter(["name", "exe", "username", "cmdline"], ad_value=None)
     new: list[psutil.Process] = []
     for proc in live_processes:
         try:
-            info = proc.info if hasattr(proc, "info") else {}
-            name = (info.get("name") or "").lower()
-            exe = (info.get("exe") or "").lower()
-            if (name, exe) not in keys:
+            identity = build_live_process_identity(proc)
+            remaining = snapshot_identities.get(identity, 0)
+            if remaining > 0:
+                snapshot_identities[identity] = remaining - 1
+            else:
                 new.append(proc)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
