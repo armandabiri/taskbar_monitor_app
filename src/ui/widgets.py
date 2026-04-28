@@ -89,15 +89,17 @@ class ScopeWidget(QWidget):
         self.label = label
         self.color = color
         self.display_text = ""
+        self.top_right_text = ""
         self.max_val_in_history = PERCENT_MAX
         self.cached_path = QPainterPath()
         self.grid_pixmap: QPixmap | None = None
 
-    def update_value(self, value: float, text: str, auto_scale: bool = False) -> None:
+    def update_value(self, value: float, text: str, auto_scale: bool = False, top_right_text: str = "") -> None:
         """Append a sample and rebuild the plotted path."""
         self.history.pop(0)
         self.history.append(value)
         self.display_text = text
+        self.top_right_text = top_right_text
         if auto_scale:
             self.max_val_in_history = max(max(self.history), MIN_AUTOSCALE)
 
@@ -159,3 +161,12 @@ class ScopeWidget(QWidget):
         painter.drawText(text_rect.translated(1, 1), align, full_text)
         painter.setPen(QColor(255, 255, 255))
         painter.drawText(text_rect, align, full_text)
+
+        if self.top_right_text:
+            tr_rect = self.rect().adjusted(0, 2, -2, 0)
+            tr_align = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight
+            painter.setPen(QColor(0, 0, 0, SCOPE_TEXT_SHADOW_ALPHA))
+            painter.drawText(tr_rect.translated(1, 1), tr_align, self.top_right_text)
+            painter.setPen(QColor(255, 255, 255))
+            painter.drawText(tr_rect, tr_align, self.top_right_text)
+

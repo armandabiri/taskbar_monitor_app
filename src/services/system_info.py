@@ -118,6 +118,54 @@ def get_gpu_stats() -> GPUStats:
     return stats
 
 
+_PDH_READY = False
+_PDH_QUERY = None
+_PDH_COUNTER = None
+
+def _init_pdh_temp() -> None:
+    global _PDH_READY, _PDH_QUERY, _PDH_COUNTER
+    if _PDH_READY:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+        pdh = ctypes.windll.pdh
+        
+        query = wintypes.HANDLE()
+        pdh.PdhOpenQueryW(None, 0, ctypes.byref(query))
+        
+        counter = wintypes.HANDLE()
+        res = pdh.PdhAddEnglishCounterW(query, r"\Thermal Zone Information(*)\Temperature", 0, ctypes.byref(counter))
+        if res == 0:
+            _PDH_QUERY = query
+            _PDH_COUNTER = counter
+            _PDH_READY = True
+    except Exception as exc:
+        LOGGER.debug("PDH initialization failed: %s", exc)
+
+def get_pdh_cpu_temp() -> float | None:
+    _init_pdh_temp()
+    if not _PDH_READY:
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        pdh = ctypes.windll.pdh
+        pdh.PdhCollectQueryData(_PDH_QUERY)
+        
+        class PDH_FMT_COUNTERVALUE(ctypes.Structure):
+            _fields_ = [("CStatus", wintypes.DWORD), ("doubleValue", ctypes.c_double)]
+            
+        val = PDH_FMT_COUNTERVALUE()
+        res = pdh.PdhGetFormattedCounterValue(_PDH_COUNTER, 0x200, None, ctypes.byref(val))
+        if res == 0:
+            # Thermal Zone Information returns Kelvin
+            return val.doubleValue - 273.15
+    except Exception as exc:
+        LOGGER.debug("PDH collect failed: %s", exc)
+    return None
+
+
 def get_cpu_temp() -> float | None:
     """Return a CPU temperature reading if any sensor is available.
 
@@ -125,19 +173,23 @@ def get_cpu_temp() -> float | None:
     LibreHardwareMonitor or similar is running. Returns None when no reading.
     """
     sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
-    if sensors_fn is None:
-        return None
-    try:
-        readings = sensors_fn()
-    except (OSError, AttributeError, NotImplementedError):
-        return None
-    if not readings:
-        return None
-    for _name, entries in readings.items():
-        for entry in entries:
-            current = getattr(entry, "current", None)
-            if current is not None:
-                return float(current)
+    
+    if sensors_fn is not None:
+        try:
+            readings = sensors_fn()
+            if readings:
+                for _name, entries in readings.items():
+                    for entry in entries:
+                        current = getattr(entry, "current", None)
+                        if current is not None:
+                            return float(current)
+        except (OSError, AttributeError, NotImplementedError):
+            pass
+
+    pdh_temp = get_pdh_cpu_temp()
+    if pdh_temp is not None:
+        return pdh_temp
+        
     return None
 
 

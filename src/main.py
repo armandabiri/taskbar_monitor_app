@@ -804,7 +804,11 @@ class TaskbarMonitor(QWidget):
             cpu = sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
             ram = psutil.virtual_memory().percent
             self.cpu_grid.update_usage(per_cpu)
-            self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%")
+            cpu_temp = get_cpu_temp()
+            if cpu_temp is None:
+                cpu_temp = get_gpu_stats().temp_c
+            cpu_temp_text = f"{int(cpu_temp)}°C" if cpu_temp is not None else "N/A"
+            self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%", top_right_text=cpu_temp_text)
             self.scopes["ram"].update_value(ram, f"{int(ram)}%")
 
             new_net = psutil.net_io_counters()
