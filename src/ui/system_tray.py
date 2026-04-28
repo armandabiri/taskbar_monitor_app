@@ -22,6 +22,10 @@ def build_tray(
     on_show_clipboard: Callable[[], None],
     on_show_snapshots: Callable[[], None],
     on_show_cleanup_history: Callable[[], None],
+    get_is_recording: Callable[[], bool],
+    on_toggle_recording: Callable[[], None],
+    on_open_recordings_folder: Callable[[], None],
+    on_show_recording_settings: Callable[[], None],
     get_click_through: Callable[[], bool],
     on_set_click_through: Callable[[bool], None],
 ) -> QSystemTrayIcon | None:
@@ -71,6 +75,20 @@ def build_tray(
     act_snapshots.triggered.connect(lambda: on_show_snapshots())
     menu.addAction(act_snapshots)
 
+    recording_menu = menu.addMenu("Microphone Recording")
+
+    act_record_toggle = QAction("Start Recording", parent)
+    act_record_toggle.triggered.connect(lambda: on_toggle_recording())
+    recording_menu.addAction(act_record_toggle)
+
+    act_open_recordings = QAction("Open Recordings Folder", parent)
+    act_open_recordings.triggered.connect(lambda: on_open_recordings_folder())
+    recording_menu.addAction(act_open_recordings)
+
+    act_recording_settings = QAction("Settings…", parent)
+    act_recording_settings.triggered.connect(lambda: on_show_recording_settings())
+    recording_menu.addAction(act_recording_settings)
+
     act_history = QAction("Cleanup History…", parent)
     act_history.triggered.connect(lambda: on_show_cleanup_history())
     menu.addAction(act_history)
@@ -97,6 +115,7 @@ def build_tray(
         act_click_through.blockSignals(True)
         act_click_through.setChecked(get_click_through())
         act_click_through.blockSignals(False)
+        act_record_toggle.setText("Stop Recording" if get_is_recording() else "Start Recording")
 
     menu.aboutToShow.connect(_sync_state)
 

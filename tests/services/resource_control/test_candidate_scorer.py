@@ -100,3 +100,9 @@ def test_candidate_scorer_disables_kill_for_different_user() -> None:
     assert decision.skip_reason is None
     assert decision.candidate is not None
     assert decision.eligible_for_kill is False
+
+
+def test_nuclear_preset_disables_visible_and_tray_sparing() -> None:
+    assert NUCLEAR.protect_foreground is False
+    assert NUCLEAR.spare_visible_windows is False
+    assert NUCLEAR.spare_tray_icons is False

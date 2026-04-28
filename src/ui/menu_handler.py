@@ -82,6 +82,18 @@ class MonitorProtocol(Protocol):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
 
+    def is_microphone_recording(self) -> bool:
+        """Return whether microphone recording is active."""
+
+    def toggle_microphone_recording(self) -> None:
+        """Start or stop microphone recording."""
+
+    def open_recordings_folder(self) -> None:
+        """Open the configured recordings folder."""
+
+    def show_recording_settings(self) -> None:
+        """Open the microphone recording settings dialog."""
+
     def reload_resource_profiles(self) -> None:
         """Reload smart/aggressive profile bindings from settings."""
 
@@ -160,6 +172,9 @@ class AppMenuBuilder:
         if isinstance(parent, MonitorProtocol):
             snapshot_action.triggered.connect(parent.show_snapshot_manager)
         menu.addAction(snapshot_action)
+
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_recording_submenu(menu, parent)
 
         cleanup_history_action = QAction("Cleanup History…", parent)
         if isinstance(parent, MonitorProtocol):
@@ -286,6 +301,26 @@ class AppMenuBuilder:
             action.triggered.connect(_make_picker(on_pick, profile.name))
             group.addAction(action)
             cleanup_menu.addAction(action)
+
+    @staticmethod
+    def _add_recording_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Build the microphone-recording submenu."""
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        recording_menu = QMenu("Microphone Recording", widget_parent)
+        menu.addMenu(recording_menu)
+
+        record_label = "Stop Recording" if parent.is_microphone_recording() else "Start Recording"
+        record_action = QAction(record_label, widget_parent)
+        record_action.triggered.connect(lambda _checked=False: parent.toggle_microphone_recording())
+        recording_menu.addAction(record_action)
+
+        open_folder_action = QAction("Open Recordings Folder", widget_parent)
+        open_folder_action.triggered.connect(lambda _checked=False: parent.open_recordings_folder())
+        recording_menu.addAction(open_folder_action)
+
+        settings_action = QAction("Settings…", widget_parent)
+        settings_action.triggered.connect(lambda _checked=False: parent.show_recording_settings())
+        recording_menu.addAction(settings_action)
 
 
 def _make_picker(on_pick, profile_name: str):

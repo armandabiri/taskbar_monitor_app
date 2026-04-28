@@ -5,6 +5,8 @@ Taskbar Monitor is a Windows 11 desktop utility built with PyQt6. It combines a 
 ## Features
 
 - Live CPU, RAM, network, disk, GPU, VRAM, temperature, battery, and timer widgets.
+- One-click microphone recording to MP3 with shared input access.
+- Recording settings from the app menu: save folder, filename prefix, bitrate, sample rate, channel mode, and optional auto-open folder after save.
 - Profile-driven cleanup modes for trim, throttle, and optional kill actions.
 - Process snapshots stored as CSV under the writable app-data directory.
 - Snapshot extra-process cleanup preview:
@@ -22,6 +24,12 @@ The app now stores writable runtime files under `QStandardPaths.AppDataLocation`
 - Snapshots: `.../snapshots`
 - Cleanup history: `.../cleanup_history.jsonl`
 - Log file: `.../taskbar_monitor.log`
+
+By default, microphone recordings are written to the user's music library under:
+
+- `.../Music/TaskbarMonitor/Recordings`
+
+You can change the save location from `Microphone Recording -> Settings…` in the app menu.
 
 ## Snapshot Extras Workflow
 

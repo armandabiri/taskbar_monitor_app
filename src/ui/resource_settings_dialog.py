@@ -8,6 +8,7 @@ from typing import Callable
 
 from PyQt6.QtCore import QSettings, Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -19,6 +20,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QVBoxLayout,
@@ -43,6 +45,7 @@ from services.resource_control import (
 )
 
 LOGGER = logging.getLogger(__name__)
+_LAST_EDITOR_PROFILE_KEY = "resource_control/last_editor_profile"
 
 _FLUSH_LABELS = {
     FLUSH_NEVER: "Never (lowest disk I/O)",
@@ -81,6 +84,7 @@ class ResourceSettingsDialog(QDialog):
         parent: QWidget | None = None,
     ) -> None:
         super().__init__(parent)
+        self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         self.setWindowTitle("Resource Cleanup Settings")
         self.setStyleSheet(_DIALOG_STYLE)
         self.setMinimumWidth(440)
@@ -267,10 +271,13 @@ class ResourceSettingsDialog(QDialog):
 
             smart = load_active_smart_profile(self._settings).name
             aggressive = load_active_aggressive_profile(self._settings).name
+            editor_name = str(self._settings.value(_LAST_EDITOR_PROFILE_KEY, smart))
+            if editor_name not in names:
+                editor_name = smart
             self._select_in_combo(self._smart_combo, smart)
             self._select_in_combo(self._aggressive_combo, aggressive)
-            self._select_in_combo(self._editor_combo, smart)
-            self._load_profile_into_editor(smart)
+            self._select_in_combo(self._editor_combo, editor_name)
+            self._load_profile_into_editor(editor_name)
         finally:
             self._loading = False
 
@@ -342,6 +349,8 @@ class ResourceSettingsDialog(QDialog):
     def _on_editor_changed(self, name: str) -> None:
         if self._loading or not name:
             return
+        self._settings.setValue(_LAST_EDITOR_PROFILE_KEY, name)
+        self._settings.sync()
         self._load_profile_into_editor(name)
 
     def _on_reset(self) -> None:
@@ -369,11 +378,19 @@ class ResourceSettingsDialog(QDialog):
 
             set_active_smart_profile(self._settings, self._smart_combo.currentText())
             set_active_aggressive_profile(self._settings, self._aggressive_combo.currentText())
+            self._settings.setValue(_LAST_EDITOR_PROFILE_KEY, edited.name)
+            self._settings.sync()
 
             if self._on_apply is not None:
                 self._on_apply()
         except Exception:  # pylint: disable=broad-exception-caught
             LOGGER.exception("Failed to save resource settings")
+            QMessageBox.critical(
+                self,
+                "Save Failed",
+                "Resource cleanup settings could not be saved. Check the log for details.",
+            )
+            return
         self.accept()
 
 
@@ -392,4 +409,35 @@ def open_resource_settings_dialog(
     parent: QWidget | None = None,
 ) -> None:
     dialog = ResourceSettingsDialog(settings, on_apply=on_apply, parent=parent)
+    _position_dialog_above_parent(dialog, parent)
     dialog.exec()
+
+
+def _position_dialog_above_parent(
+    dialog: QDialog,
+    parent: QWidget | None,
+    *,
+    gap: int = 24,
+) -> None:
+    size = dialog.sizeHint().expandedTo(dialog.minimumSize())
+    dialog.resize(size)
+    if parent is None:
+        return
+
+    parent_rect = parent.frameGeometry()
+    screen = parent.screen() or QApplication.primaryScreen()
+    available = screen.availableGeometry() if screen is not None else parent_rect
+    frame = dialog.frameGeometry()
+
+    max_x = max(available.left(), available.right() - frame.width() + 1)
+    x_pos = max(
+        available.left(),
+        min(parent_rect.center().x() - (frame.width() // 2), max_x),
+    )
+    above_y = parent_rect.top() - frame.height() - gap
+    if above_y >= available.top():
+        y_pos = above_y
+    else:
+        max_y = max(available.top(), available.bottom() - frame.height() + 1)
+        y_pos = max(available.top(), min(parent_rect.bottom() + gap, max_y))
+    dialog.move(x_pos, y_pos)

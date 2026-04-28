@@ -13,6 +13,7 @@ from typing import Iterable
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QDialog,
     QHBoxLayout,
@@ -84,6 +85,7 @@ def confirm_kill(
         return None
 
     dialog = QDialog(parent)
+    dialog.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
     dialog.setWindowTitle(title)
     dialog.setStyleSheet(_DIALOG_STYLE)
     dialog.setMinimumSize(620, 540)
@@ -189,6 +191,7 @@ def confirm_kill(
     for cb in checkboxes:
         cb.toggled.connect(lambda _checked: _refresh_summary())
     _refresh_summary()
+    _position_dialog_above_parent(dialog, parent)
 
     if dialog.exec() != QDialog.DialogCode.Accepted:
         return None
@@ -204,3 +207,33 @@ def _set_all(checkboxes: list[QCheckBox], state: bool) -> None:
     if checkboxes:
         # Trigger one signal so the summary updates.
         checkboxes[0].toggled.emit(checkboxes[0].isChecked())
+
+
+def _position_dialog_above_parent(
+    dialog: QDialog,
+    parent: QWidget | None,
+    *,
+    gap: int = 20,
+) -> None:
+    size = dialog.sizeHint().expandedTo(dialog.minimumSize())
+    dialog.resize(size)
+    if parent is None:
+        return
+
+    parent_rect = parent.frameGeometry()
+    screen = parent.screen() or QApplication.primaryScreen()
+    available = screen.availableGeometry() if screen is not None else parent_rect
+    frame = dialog.frameGeometry()
+
+    max_x = max(available.left(), available.right() - frame.width() + 1)
+    x_pos = max(
+        available.left(),
+        min(parent_rect.center().x() - (frame.width() // 2), max_x),
+    )
+    above_y = parent_rect.top() - frame.height() - gap
+    if above_y >= available.top():
+        y_pos = above_y
+    else:
+        max_y = max(available.top(), available.bottom() - frame.height() + 1)
+        y_pos = max(available.top(), min(parent_rect.bottom() + gap, max_y))
+    dialog.move(x_pos, y_pos)

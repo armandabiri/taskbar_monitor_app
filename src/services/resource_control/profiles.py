@@ -11,6 +11,7 @@ from PyQt6.QtCore import QSettings
 SETTINGS_GROUP = "resource_control"
 KEY_ACTIVE_SMART = "active_smart_profile"
 KEY_ACTIVE_AGGRESSIVE = "active_aggressive_profile"
+KEY_ACTIVE_AGGRESSIVE_EXPLICIT = "active_aggressive_profile_explicit"
 KEY_CUSTOM_PREFIX = "custom_profile/"
 
 # Standby-cache flush policy values
@@ -93,7 +94,7 @@ class ResourceProfile:
 GENTLE = ResourceProfile(
     name="Gentle",
     aggressive=False,
-    pressure_threshold_percent=88.0,
+    pressure_threshold_percent=60.0,
     enable_trim=True,
     trim_threshold_mb=400.0,
     max_trim_per_run=2,
@@ -112,7 +113,7 @@ GENTLE = ResourceProfile(
 BALANCED = ResourceProfile(
     name="Balanced",
     aggressive=False,
-    pressure_threshold_percent=80.0,
+    pressure_threshold_percent=50.0,
     enable_trim=True,
     trim_threshold_mb=200.0,
     max_trim_per_run=4,
@@ -131,7 +132,7 @@ BALANCED = ResourceProfile(
 AGGRESSIVE = ResourceProfile(
     name="Aggressive",
     aggressive=True,
-    pressure_threshold_percent=70.0,
+    pressure_threshold_percent=30.0,
     enable_trim=True,
     trim_threshold_mb=150.0,
     max_trim_per_run=6,
@@ -150,7 +151,7 @@ AGGRESSIVE = ResourceProfile(
 NUCLEAR = ResourceProfile(
     name="Nuclear",
     aggressive=True,
-    pressure_threshold_percent=60.0,
+    pressure_threshold_percent=10.0,
     enable_trim=True,
     trim_threshold_mb=100.0,
     max_trim_per_run=10,
@@ -161,12 +162,12 @@ NUCLEAR = ResourceProfile(
     enable_throttle=True,
     max_throttle_per_run=5,
     throttle_cooldown_seconds=45.0,
-    protect_foreground=True,
-    new_process_grace_seconds=15.0,
+    protect_foreground=False,
+    new_process_grace_seconds=5.0,
     run_gc=True,
     enable_kill=True,
-    spare_visible_windows=True,
-    spare_tray_icons=True,
+    spare_visible_windows=False,
+    spare_tray_icons=False,
     confirm_before_kill=True,
     empty_all_working_sets=True,
     flush_modified_pages=True,
@@ -175,7 +176,7 @@ NUCLEAR = ResourceProfile(
 BUILTIN_PRESETS: tuple[ResourceProfile, ...] = (GENTLE, BALANCED, AGGRESSIVE, NUCLEAR)
 BUILTIN_NAMES = frozenset(p.name for p in BUILTIN_PRESETS)
 DEFAULT_SMART_NAME = BALANCED.name
-DEFAULT_AGGRESSIVE_NAME = AGGRESSIVE.name
+DEFAULT_AGGRESSIVE_NAME = NUCLEAR.name
 
 
 def get_preset(name: str) -> ResourceProfile | None:
@@ -212,9 +213,19 @@ def load_active_smart_profile(settings: QSettings) -> ResourceProfile:
 
 
 def load_active_aggressive_profile(settings: QSettings) -> ResourceProfile:
-    name = settings.value(
-        f"{SETTINGS_GROUP}/{KEY_ACTIVE_AGGRESSIVE}", DEFAULT_AGGRESSIVE_NAME
-    )
+    key = f"{SETTINGS_GROUP}/{KEY_ACTIVE_AGGRESSIVE}"
+    explicit_key = f"{SETTINGS_GROUP}/{KEY_ACTIVE_AGGRESSIVE_EXPLICIT}"
+    name = settings.value(key)
+    explicit = settings.value(explicit_key, False)
+    is_explicit = bool(explicit) if isinstance(explicit, bool) else str(explicit).strip().lower() in {
+        "1", "true", "yes", "on",
+    }
+    if name is None:
+        return load_profile(settings, DEFAULT_AGGRESSIVE_NAME)
+    if not is_explicit and str(name) == AGGRESSIVE.name:
+        settings.setValue(key, NUCLEAR.name)
+        settings.sync()
+        return load_profile(settings, NUCLEAR.name)
     return load_profile(settings, str(name))
 
 
@@ -225,6 +236,7 @@ def set_active_smart_profile(settings: QSettings, name: str) -> None:
 
 def set_active_aggressive_profile(settings: QSettings, name: str) -> None:
     settings.setValue(f"{SETTINGS_GROUP}/{KEY_ACTIVE_AGGRESSIVE}", name)
+    settings.setValue(f"{SETTINGS_GROUP}/{KEY_ACTIVE_AGGRESSIVE_EXPLICIT}", True)
     settings.sync()
 
 

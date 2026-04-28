@@ -1,5 +1,8 @@
 # -*- mode: python ; coding: utf-8 -*-
 
+from PyInstaller.utils.hooks import collect_data_files
+
+sounddevice_datas = collect_data_files('_sounddevice_data')
 
 a = Analysis(
     ['src/main.py'],
@@ -8,13 +11,15 @@ a = Analysis(
     datas=[
         ('src/assets/taskbar-monitor.svg', 'assets'),
         ('src/assets/taskbar-monitor.ico', 'assets'),
-    ],
+    ] + sounddevice_datas,
     hiddenimports=[
         'ui.cleanup_history_dialog',
         'ui.cleanup_result_dialog',
         'ui.snapshot_live_cleanup_dialog',
         'services.resource_control.history',
         'services.resource_control.snapshot_scope',
+        'sounddevice',
+        'lameenc',
     ],
     hookspath=[],
     hooksconfig={},

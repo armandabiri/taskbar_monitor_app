@@ -3,3 +3,5 @@ PyQt6
 win11toast
 types-psutil
 keyboard
+sounddevice
+lameenc

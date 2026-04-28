@@ -40,6 +40,7 @@ PROTECTED_NAMES = frozenset({
     "services.exe", "lsass.exe", "svchost.exe", "winlogon.exe", "dwm.exe",
     "fontdrvhost.exe", "explorer.exe", "taskmgr.exe", "shellexperiencehost.exe",
     "searchhost.exe", "startmenuexperiencehost.exe", "applicationframehost.exe",
+    "memcompression", "memory compression", "secure system",
 })
 PROTECTED_USERS = frozenset({
     "nt authority\\system",

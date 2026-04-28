@@ -116,6 +116,16 @@ def snapshots_root_dir() -> str:
     return target
 
 
+def recordings_dir() -> str:
+    """Return the writable directory for microphone recordings."""
+    base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.MusicLocation)
+    if not base:
+        base = app_data_dir()
+    target = os.path.join(base, APP_NAME, "Recordings")
+    os.makedirs(target, exist_ok=True)
+    return target
+
+
 def read_setting_int(settings: QSettings, key: str, default: int) -> int:
     """Read an integer setting safely with a default fallback."""
     value = settings.value(key, default)

@@ -149,15 +149,21 @@ class CandidateScorer:
         self, candidates: list[ProcessCandidate], plan: ResourcePlan,
     ) -> list[ProcessCandidate]:
         selected: list[ProcessCandidate] = []
+        if plan.max_trimmed_processes <= 0:
+            return selected
         estimated_total = 0.0
-        for candidate in sorted(candidates, key=lambda item: item.reclaim_score, reverse=True):
+        for candidate in self.rank_trim_candidates(candidates):
             selected.append(candidate)
             estimated_total += candidate.estimated_reclaim_gb
             if len(selected) >= plan.max_trimmed_processes:
                 break
-            if estimated_total >= plan.reclaim_target_gb * (1.30 if plan.aggressive else 1.15):
+            if not plan.aggressive and estimated_total >= plan.reclaim_target_gb * 1.15:
                 break
         return selected
+
+    def rank_trim_candidates(self, candidates: list[ProcessCandidate]) -> list[ProcessCandidate]:
+        """Return trim candidates ordered from best to worst reclaim value."""
+        return sorted(candidates, key=lambda item: item.reclaim_score, reverse=True)
 
     def select_throttle_targets(
         self, candidates: list[ProcessCandidate], plan: ResourcePlan,

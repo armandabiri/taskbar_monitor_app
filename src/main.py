@@ -4,9 +4,10 @@ import os
 import sys
 
 import psutil
-from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QContextMenuEvent,
+    QDesktopServices,
     QIcon,
     QMouseEvent,
     QPainter,
@@ -47,6 +48,11 @@ from core.config import (
 )
 from core.theme import ThemeEngine
 from services.clipboard_history_service import ClipboardHistoryService
+from services.microphone_recorder import (
+    MicrophoneRecorder,
+    MicrophoneRecorderError,
+    load_recording_settings,
+)
 from services.notification_service import NotificationService
 
 # Services
@@ -73,6 +79,7 @@ from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
+from ui.recording_settings_dialog import open_recording_settings_dialog
 from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.snapshot_live_cleanup_dialog import select_snapshot_extra_processes
 from ui.system_tray import build_tray
@@ -210,6 +217,8 @@ class TaskbarMonitor(QWidget):
         self._last_release_error_count = 0
         self._smart_profile = load_active_smart_profile(self.settings)
         self._aggressive_profile = load_active_aggressive_profile(self.settings)
+        self._recording_settings = load_recording_settings(self.settings)
+        self._microphone_recorder = MicrophoneRecorder(self._recording_settings)
 
         self.setup_ui()
 
@@ -248,6 +257,10 @@ class TaskbarMonitor(QWidget):
             on_show_clipboard=self.show_clipboard_popup,
             on_show_snapshots=self.show_snapshot_manager,
             on_show_cleanup_history=self.show_cleanup_history,
+            get_is_recording=lambda: self.is_microphone_recording(),
+            on_toggle_recording=self.toggle_microphone_recording,
+            on_open_recordings_folder=self.open_recordings_folder,
+            on_show_recording_settings=self.show_recording_settings,
             get_click_through=lambda: self.click_through,
             on_set_click_through=self.set_click_through,
         )
@@ -441,6 +454,25 @@ class TaskbarMonitor(QWidget):
                 background-color: rgba(60, 60, 60, 180);
             }
         """
+        recording_btn_style = """
+            QPushButton {
+                background-color: rgba(60, 25, 25, 220);
+                color: #ff7675;
+                border: 1px solid #ff7675;
+                border-radius: 4px;
+                font-size: 13px;
+                padding: 0;
+            }
+            QPushButton:hover {
+                background-color: rgba(85, 35, 35, 235);
+                border-color: #fab1a0;
+            }
+            QPushButton:pressed {
+                background-color: rgba(255, 118, 117, 70);
+            }
+        """
+        self._mic_button_idle_style = btn_style
+        self._mic_button_recording_style = recording_btn_style
 
         # AutoSmart Button — uses the active "smart" profile
         self.smart_btn = QPushButton("🧠", self)
@@ -490,6 +522,16 @@ class TaskbarMonitor(QWidget):
         self.snapshot_btn.clicked.connect(self.show_snapshot_manager)
         self.main_layout.addWidget(self.snapshot_btn)
 
+        self.mic_btn = QPushButton("🎙", self)
+        self.mic_btn.setToolTip(
+            "Start microphone recording to MP3.\n"
+            "Uses shared input access and does not request exclusive control of the mic."
+        )
+        self.mic_btn.setFixedSize(24, 24)
+        self.mic_btn.setStyleSheet(self._mic_button_idle_style)
+        self.mic_btn.clicked.connect(self._toggle_microphone_recording)
+        self.main_layout.addWidget(self.mic_btn)
+
         self.cpu_grid = CPUBarWidget()
         self.main_layout.addWidget(self.cpu_grid)
 
@@ -529,6 +571,37 @@ class TaskbarMonitor(QWidget):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
         open_cleanup_history_dialog(parent=self)
+
+    def show_recording_settings(self) -> None:
+        """Open the microphone recording settings dialog."""
+        open_recording_settings_dialog(
+            self.settings,
+            on_apply=self.reload_recording_settings,
+            parent=self,
+        )
+
+    def reload_recording_settings(self) -> None:
+        """Reload microphone recording settings from QSettings."""
+        self._recording_settings = load_recording_settings(self.settings)
+        self._microphone_recorder.update_settings(self._recording_settings)
+        self._set_microphone_button_state(self._microphone_recorder.is_recording, self._microphone_recorder.active_session)
+
+    def open_recordings_folder(self) -> None:
+        """Open the configured recordings directory in the OS shell."""
+        folder = self._format_notification_path(self._recording_settings.effective_output_dir())
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(folder)):
+            NotificationService.notify(
+                APP_NAME,
+                f"Could not open the recordings folder.\nPath:\n{folder}",
+            )
+
+    def is_microphone_recording(self) -> bool:
+        """Return whether microphone recording is active."""
+        return self._microphone_recorder.is_recording
+
+    def toggle_microphone_recording(self) -> None:
+        """Public wrapper used by menus and tray actions."""
+        self._toggle_microphone_recording()
 
     def _clean_using_snapshot(self, snapshot: ProcessSnapshot) -> None:
         """Preview and kill only the extra processes that appeared after a snapshot."""
@@ -576,6 +649,82 @@ class TaskbarMonitor(QWidget):
                 f"Aggressive ({self._aggressive_profile.name}): Deep memory cleanup "
                 "[Ctrl+Shift+Alt+Backspace]"
             )
+
+    def _toggle_microphone_recording(self) -> None:
+        """Start or stop microphone recording."""
+        if self._microphone_recorder.is_recording:
+            self._stop_microphone_recording()
+        else:
+            self._start_microphone_recording()
+
+    def _start_microphone_recording(self) -> None:
+        """Start capturing microphone audio to an MP3 file."""
+        try:
+            session = self._microphone_recorder.start_recording()
+        except MicrophoneRecorderError as exc:
+            LOGGER.warning("Microphone recording could not start: %s", exc)
+            NotificationService.notify(APP_NAME, str(exc))
+            self._set_microphone_button_state(False)
+            return
+        LOGGER.info("Microphone recording started: %s", session.output_path)
+        self._set_microphone_button_state(True, session)
+        output_path = self._format_notification_path(session.output_path)
+        NotificationService.notify(
+            APP_NAME,
+            f"Microphone recording started.\nPath:\n{output_path}\nDevice: {session.device_name}",
+        )
+
+    def _stop_microphone_recording(self) -> None:
+        """Stop the active microphone recording and flush the MP3 file."""
+        active_session = self._microphone_recorder.active_session
+        try:
+            session = self._microphone_recorder.stop_recording()
+        except MicrophoneRecorderError as exc:
+            LOGGER.warning("Microphone recording could not stop cleanly: %s", exc)
+            NotificationService.notify(APP_NAME, str(exc))
+            self._set_microphone_button_state(False)
+            return
+        self._set_microphone_button_state(False)
+        target = session if active_session is None else active_session
+        LOGGER.info("Microphone recording saved: %s", target.output_path)
+        output_path = self._format_notification_path(target.output_path)
+        NotificationService.notify(
+            APP_NAME,
+            f"Microphone recording saved.\nPath:\n{output_path}",
+        )
+        if self._recording_settings.open_folder_after_save:
+            self.open_recordings_folder()
+
+    def _set_microphone_button_state(self, recording: bool, session=None) -> None:
+        """Refresh the microphone button appearance and tooltip."""
+        if recording:
+            self.mic_btn.setText("⏹")
+            self.mic_btn.setStyleSheet(self._mic_button_recording_style)
+            self.mic_btn.setToolTip(
+                "Stop microphone recording and save the MP3.\n"
+                f"Recording: {os.path.basename(session.output_path)}"
+            )
+            return
+        self.mic_btn.setText("🎙")
+        self.mic_btn.setStyleSheet(self._mic_button_idle_style)
+        self.mic_btn.setToolTip(
+            "Start microphone recording to MP3.\n"
+            f"Folder: {self._recording_settings.effective_output_dir()}"
+        )
+
+    def _sync_microphone_recording_status(self) -> None:
+        """Keep the button state in sync with the recorder worker state."""
+        if self._microphone_recorder.is_recording:
+            return
+        if self.mic_btn.text() == "⏹":
+            self._set_microphone_button_state(False)
+            error = self._microphone_recorder.consume_last_error()
+            if error:
+                NotificationService.notify(APP_NAME, error)
+
+    def _format_notification_path(self, path: str) -> str:
+        """Normalize a filesystem path before showing it in notifications."""
+        return os.path.abspath(os.path.normpath(path))
 
     def _on_release_resources(self, aggressive: bool = False) -> None:
         """Trigger resource release and flash feedback on the calling button."""
@@ -647,6 +796,7 @@ class TaskbarMonitor(QWidget):
     def update_stats(self) -> None:
         """Poll system stats and refresh monitor widgets."""
         try:
+            self._sync_microphone_recording_status()
             # Single per-CPU sample; average it for the scalar scope to avoid
             # calling cpu_percent() twice (each call resets psutil's internal
             # baseline, which distorts readings).
@@ -874,6 +1024,11 @@ class TaskbarMonitor(QWidget):
 
     def closeEvent(self, a0) -> None:  # pylint: disable=invalid-name
         """Cleanup shortcuts on close."""
+        if self._microphone_recorder.is_recording:
+            try:
+                self._microphone_recorder.stop_recording()
+            except MicrophoneRecorderError:
+                LOGGER.exception("Failed to stop microphone recording during shutdown")
         self.shortcut_service.unregister_all()
         if self.tray is not None:
             self.tray.hide()

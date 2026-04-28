@@ -155,9 +155,8 @@ def _run_system_reclaim(
         result.record_skip(SkipReason.BELOW_PRESSURE_THRESHOLD)
         result.notes.append(
             f"System memory {system.memory_percent:.0f}% is below the configured threshold "
-            f"{profile.pressure_threshold_percent:.0f}%."
+            f"{profile.pressure_threshold_percent:.0f}%, so only a low-pressure cleanup pass will run."
         )
-        return
 
     own_pid = os.getpid()
     own_username = _safe_own_username()
@@ -183,8 +182,7 @@ def _run_system_reclaim(
     result.kill_candidates_found = len(_select_kill_targets(candidates, profile))
 
     if profile.enable_trim:
-        for candidate in _SCORER.select_trim_targets(candidates, plan):
-            _do_trim(candidate, now_mono, result)
+        _execute_trim_phase(candidates, plan, now_mono, result)
 
     if profile.enable_throttle:
         for candidate in _SCORER.select_throttle_targets(candidates, plan):
@@ -458,16 +456,47 @@ def _select_kill_targets(
     return sorted(filtered, key=lambda c: c.rss_gb, reverse=True)
 
 
-def _do_trim(candidate: ProcessCandidate, now_mono: float, result: ReleaseResult) -> None:
+def _execute_trim_phase(candidates: list[ProcessCandidate], plan, now_mono: float, result: ReleaseResult) -> None:
+    """Trim candidates until the per-run budget is exhausted.
+
+    Gentle profiles still stop early once the estimated reclaim goal is met.
+    Aggressive profiles spend the full trim budget so one optimistic estimate
+    does not short-circuit the cleanup.
+    """
+    ranked = _SCORER.rank_trim_candidates(candidates)
+    if not ranked or plan.max_trimmed_processes <= 0:
+        return
+
+    success_count = 0
+    estimated_success_gb = 0.0
+    attempt_budget = min(len(ranked), max(plan.max_trimmed_processes * 4, plan.max_trimmed_processes + 4))
+    reclaim_goal_gb = plan.reclaim_target_gb * 1.15
+
+    for attempt_count, candidate in enumerate(ranked, start=1):
+        if success_count >= plan.max_trimmed_processes:
+            break
+        if not plan.aggressive and success_count > 0 and estimated_success_gb >= reclaim_goal_gb:
+            break
+        if attempt_count > attempt_budget:
+            break
+        if _do_trim(candidate, now_mono, result):
+            success_count += 1
+            estimated_success_gb += candidate.estimated_reclaim_gb
+
+
+def _do_trim(candidate: ProcessCandidate, now_mono: float, result: ReleaseResult) -> bool:
+    """Trim one process working set and record the result."""
     try:
         freed = _OPERATOR.trim_workingset(candidate.pid)
         result.ram_freed_gb += freed / 1024.0
         result.record_cleaned(candidate.pid, "trimmed", candidate.name)
         _TRACKER.note_trimmed(candidate.pid, now_mono)
+        return True
     except (psutil.NoSuchProcess, psutil.AccessDenied, OSError) as exc:
         result.record_skip(SkipReason.EXECUTION_FAILED)
         result.processes_skipped += 1
         _append_error(result, str(exc))
+        return False
 
 
 def _do_throttle(candidate: ProcessCandidate, plan, now_mono: float, result: ReleaseResult) -> None:
