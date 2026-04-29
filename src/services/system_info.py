@@ -159,6 +159,9 @@ def get_pdh_cpu_temp() -> float | None:
         val = PDH_FMT_COUNTERVALUE()
         res = pdh.PdhGetFormattedCounterValue(_PDH_COUNTER, 0x200, None, ctypes.byref(val))
         if res == 0:
+            # 301.0 K (27.85 C) is a static fake ACPI thermal zone value on many Windows systems.
+            if val.doubleValue == 301.0:
+                return None
             # Thermal Zone Information returns Kelvin
             return val.doubleValue - 273.15
     except Exception as exc:
@@ -166,14 +169,55 @@ def get_pdh_cpu_temp() -> float | None:
     return None
 
 
-def get_cpu_temp() -> float | None:
-    """Return a CPU temperature reading if any sensor is available.
+import urllib.request
+import json
+import time
 
-    On Windows, psutil.sensors_temperatures() is generally empty unless
-    LibreHardwareMonitor or similar is running. Returns None when no reading.
-    """
-    sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
+_LHM_CACHE: dict = {}
+_LHM_LAST_FETCH = 0.0
+
+def _fetch_lhm_data() -> dict:
+    global _LHM_CACHE, _LHM_LAST_FETCH
+    now = time.time()
+    if now - _LHM_LAST_FETCH < 0.5:
+        return _LHM_CACHE
+    try:
+        req = urllib.request.Request("http://127.0.0.1:8085/data.json", method="GET")
+        with urllib.request.urlopen(req, timeout=0.2) as resp:
+            _LHM_CACHE = json.loads(resp.read().decode())
+            _LHM_LAST_FETCH = now
+    except Exception:
+        _LHM_CACHE = {}
+        _LHM_LAST_FETCH = now
+    return _LHM_CACHE
+
+def _collect_lhm_sensors(data: dict, sensor_type: str, name_hints: list[str], parent_hints: list[str], current_parent: str = "") -> list[float]:
+    temps = []
+    name = data.get("Text", "").upper()
+    my_type = data.get("Type", "")
     
+    if my_type == sensor_type:
+        if any(h in name for h in name_hints) or any(h in current_parent for h in parent_hints):
+            val_str = data.get("Value", "").split(" ")[0].replace(',', '.')
+            try:
+                temps.append(float(val_str))
+            except ValueError:
+                pass
+                
+    for child in data.get("Children", []):
+        temps.extend(_collect_lhm_sensors(child, sensor_type, name_hints, parent_hints, name if not current_parent else current_parent + " " + name))
+    return temps
+
+
+def get_cpu_temp() -> float | None:
+    """Return a CPU temperature reading if any sensor is available."""
+    lhm_data = _fetch_lhm_data()
+    if lhm_data:
+        temps = _collect_lhm_sensors(lhm_data, "Temperature", ["CPU PACKAGE", "CORE AVERAGE", "CORE MAX", "CPU CORE"], ["INTEL", "CPU"])
+        if temps:
+            return temps[0]
+
+    sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
     if sensors_fn is not None:
         try:
             readings = sensors_fn()
@@ -190,6 +234,34 @@ def get_cpu_temp() -> float | None:
     if pdh_temp is not None:
         return pdh_temp
         
+    return None
+
+def get_ram_temp() -> float | None:
+    """Return average RAM temperature if DDR/DIMM sensors are available."""
+    lhm_data = _fetch_lhm_data()
+    if lhm_data:
+        temps = _collect_lhm_sensors(lhm_data, "Temperature", ["DDR", "DIMM", "TEMPERATURE"], ["MEMORY", "CORSAIR", "DIMM", "DDR"])
+        if temps:
+            return sum(temps) / len(temps)
+
+    sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
+    if sensors_fn is not None:
+        try:
+            readings = sensors_fn()
+            if readings:
+                temps = []
+                for name, entries in readings.items():
+                    for entry in entries:
+                        lbl = getattr(entry, "label", "").upper()
+                        n = name.upper()
+                        if "DDR" in n or "DDR" in lbl or "DIMM" in n or "DIMM" in lbl:
+                            current = getattr(entry, "current", None)
+                            if current is not None:
+                                temps.append(float(current))
+                if temps:
+                    return sum(temps) / len(temps)
+        except (OSError, AttributeError, NotImplementedError):
+            pass
     return None
 
 

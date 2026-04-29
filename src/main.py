@@ -68,6 +68,7 @@ from services.system_info import (
     get_battery,
     get_cpu_temp,
     get_gpu_stats,
+    get_ram_temp,
     prime_process_cpu,
 )
 # UI
@@ -208,9 +209,7 @@ class TaskbarMonitor(QWidget):
         # Probe optional capabilities before building UI
         self._gpu_available = get_gpu_stats().available
         self._battery_available = get_battery() is not None
-        self._temp_available = get_cpu_temp() is not None or (
-            self._gpu_available and get_gpu_stats().temp_c is not None
-        )
+        self._temp_available = True
 
         self.process_popup: TopProcessesPopup | None = None
         self.clipboard_popup: ClipboardHistoryPopup | None = None
@@ -547,6 +546,8 @@ class TaskbarMonitor(QWidget):
             self.scopes["vram"] = ScopeWidget("VRAM", COLOR_VRAM)
         if self._temp_available:
             self.scopes["temp"] = ScopeWidget("TEMP", COLOR_TEMP)
+            self.scopes["temp"].sec_min = 110.0
+            self.scopes["temp"].sec_max = 180.0
 
         for scope in self.scopes.values():
             self.main_layout.addWidget(scope, 1)
@@ -804,11 +805,7 @@ class TaskbarMonitor(QWidget):
             cpu = sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
             ram = psutil.virtual_memory().percent
             self.cpu_grid.update_usage(per_cpu)
-            cpu_temp = get_cpu_temp()
-            if cpu_temp is None:
-                cpu_temp = get_gpu_stats().temp_c
-            cpu_temp_text = f"{int(cpu_temp)}°C" if cpu_temp is not None else "N/A"
-            self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%", top_right_text=cpu_temp_text)
+            self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%")
             self.scopes["ram"].update_value(ram, f"{int(ram)}%")
 
             new_net = psutil.net_io_counters()
@@ -836,11 +833,26 @@ class TaskbarMonitor(QWidget):
                     vram_pct = gpu.vram_percent
                     self.scopes["vram"].update_value(vram_pct, f"{int(vram_pct)}%")
                 if "temp" in self.scopes:
-                    temp = get_cpu_temp()
-                    if temp is None:
-                        temp = gpu.temp_c
-                    if temp is not None:
-                        self.scopes["temp"].update_value(temp, f"{int(temp)}°C")
+                    c_temp = get_cpu_temp()
+                    if c_temp is None:
+                        c_temp = gpu.temp_c
+                    c_temp_f = c_temp * 9 / 5 + 32 if c_temp is not None else None
+                    
+                    r_temp = get_ram_temp()
+                    r_temp_f = r_temp * 9 / 5 + 32 if r_temp is not None else None
+                    
+                    text = ""
+                    if c_temp_f is not None:
+                        text += f"CPU: {int(c_temp_f)}°F"
+                    if r_temp_f is not None:
+                        text += f" RAM: {int(r_temp_f)}°F"
+                    
+                    self.scopes["temp"].update_value(
+                        value=c_temp_f if c_temp_f is not None else 0.0,
+                        text=text.strip() if text else "N/A",
+                        auto_scale=True,
+                        secondary_value=r_temp_f
+                    )
 
             if self._battery_available:
                 self.battery_widget.update_stats(get_battery())

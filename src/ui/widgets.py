@@ -86,18 +86,24 @@ class ScopeWidget(QWidget):
         super().__init__(parent)
         self.setMinimumSize(SCOPE_MIN_WIDTH, SCOPE_MIN_HEIGHT)
         self.history: list[float] = [0.0] * SCOPE_HISTORY_SIZE
+        self.secondary_history: list[float | None] = [None] * SCOPE_HISTORY_SIZE
         self.label = label
         self.color = color
         self.display_text = ""
         self.top_right_text = ""
         self.max_val_in_history = PERCENT_MAX
         self.cached_path = QPainterPath()
+        self.cached_secondary_path = QPainterPath()
         self.grid_pixmap: QPixmap | None = None
+        self.sec_min = 110.0
+        self.sec_max = 150.0
 
-    def update_value(self, value: float, text: str, auto_scale: bool = False, top_right_text: str = "") -> None:
+    def update_value(self, value: float, text: str, auto_scale: bool = False, top_right_text: str = "", secondary_value: float | None = None) -> None:
         """Append a sample and rebuild the plotted path."""
         self.history.pop(0)
         self.history.append(value)
+        self.secondary_history.pop(0)
+        self.secondary_history.append(secondary_value)
         self.display_text = text
         self.top_right_text = top_right_text
         if auto_scale:
@@ -106,8 +112,13 @@ class ScopeWidget(QWidget):
         width = self.width()
         height = self.height()
         path = QPainterPath()
+        secondary_path = QPainterPath()
+        
         num_samples = min(len(self.history), width // SCOPE_POINT_STEP)
         visible = self.history[-num_samples:]
+        visible_sec = self.secondary_history[-num_samples:]
+        
+        sec_started = False
         for index, sample in enumerate(visible):
             x_pos = width - (len(visible) - index) * SCOPE_POINT_STEP
             y_pos = height - SCOPE_BOTTOM_PADDING - (
@@ -117,7 +128,25 @@ class ScopeWidget(QWidget):
                 path.moveTo(x_pos, y_pos)
             else:
                 path.lineTo(x_pos, y_pos)
+                
+            sec_sample = visible_sec[index]
+            if sec_sample is not None:
+                # Map temperature to the Y axis dynamically based on sec_min/sec_max
+                # Extend the viewable area by a bit (e.g., -30, +50 to leave some padding)
+                view_min = self.sec_min - 30.0
+                view_max = self.sec_max + 50.0
+                clamped_temp = max(view_min, min(view_max, sec_sample))
+                sec_y = height - SCOPE_BOTTOM_PADDING - (
+                    (clamped_temp - view_min) / (view_max - view_min) * (height - SCOPE_VERTICAL_PADDING)
+                )
+                if not sec_started:
+                    secondary_path.moveTo(x_pos, sec_y)
+                    sec_started = True
+                else:
+                    secondary_path.lineTo(x_pos, sec_y)
+
         self.cached_path = path
+        self.cached_secondary_path = secondary_path
         self.update()
 
     def resizeEvent(self, a0: QResizeEvent | None) -> None:  # pylint: disable=invalid-name
@@ -145,12 +174,27 @@ class ScopeWidget(QWidget):
             grid_painter.end()
         painter.drawPixmap(0, 0, self.grid_pixmap)
 
+        # Primary signal
         if self.label in ("CPU", "RAM"):
             line_color = ThemeEngine.get_dynamic_color(self.history[-1])
         else:
             line_color = QColor(self.color)
         painter.setPen(QPen(line_color, SCOPE_LINE_WIDTH))
         painter.drawPath(self.cached_path)
+        
+        # Secondary signal (temperature)
+        last_sec = self.secondary_history[-1]
+        if last_sec is not None:
+            ratio = max(0.0, min(1.0, (last_sec - 110.0) / 40.0))
+            r = int(77 + (255 - 77) * ratio)
+            g = int(184 + (118 - 184) * ratio)
+            b = int(255 + (117 - 255) * ratio)
+            sec_color = QColor(r, g, b)
+            
+            pen = QPen(sec_color, 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+            painter.drawPath(self.cached_secondary_path)
 
         painter.setFont(QFont(SCOPE_LABEL_FONT, SCOPE_LABEL_FONT_SIZE, QFont.Weight.Bold))
         full_text = f"{self.label}: {self.display_text}"
