@@ -4,6 +4,7 @@ from PyQt6.QtCore import QRectF, Qt
 from PyQt6.QtGui import QColor, QFont, QPainter, QPaintEvent, QPen
 from PyQt6.QtWidgets import QWidget
 
+from core.theme import ThemeEngine
 from services.system_info import BatteryStats
 
 
@@ -19,6 +20,7 @@ class BatteryWidget(QWidget):
         self.setFixedSize(BATTERY_WIDTH, BATTERY_HEIGHT)
         self._stats: BatteryStats | None = None
         self.setToolTip("Battery")
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def update_stats(self, stats: BatteryStats | None) -> None:
         """Update the battery reading; hide the widget if there is no battery."""
@@ -53,13 +55,15 @@ class BatteryWidget(QWidget):
         else:
             fill = QColor(162, 155, 254)
 
+        theme = ThemeEngine.current()
+
         # Body (left chunk), tip (right small rectangle)
         body = QRectF(1, 4, 20, 12)
         tip = QRectF(21, 8, 2, 4)
-        painter.setPen(QPen(QColor(220, 220, 220), 1))
+        painter.setPen(QPen(theme.battery_outline, 1))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         painter.drawRect(body)
-        painter.setBrush(QColor(220, 220, 220))
+        painter.setBrush(theme.battery_outline)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawRect(tip)
 
@@ -70,13 +74,13 @@ class BatteryWidget(QWidget):
 
         # Bolt if charging
         if self._stats.plugged:
-            painter.setPen(QPen(QColor(10, 10, 10), 1.2))
+            painter.setPen(QPen(theme.battery_bolt, 1.2))
             painter.drawLine(12, 6, 9, 11)
             painter.drawLine(9, 11, 13, 11)
             painter.drawLine(13, 11, 10, 15)
 
         # Percent label
-        painter.setPen(QColor(255, 255, 255))
+        painter.setPen(theme.battery_label)
         painter.setFont(QFont("Segoe UI", 7, QFont.Weight.Bold))
         painter.drawText(
             QRectF(24, 0, BATTERY_WIDTH - 24, BATTERY_HEIGHT),

@@ -1,0 +1,13 @@
+{
+  "default": true,
+  "MD003": { "style": "atx" },
+  "MD013": false,
+  "MD022": true,
+  "MD024": { "siblings_only": true },
+  "MD025": { "front_matter_title": "" },
+  "MD026": { "punctuation": ".,;:!。，；：！" },
+  "MD031": true,
+  "MD040": true,
+  "MD041": false,
+  "MD046": { "style": "fenced" }
+}

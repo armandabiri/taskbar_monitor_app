@@ -46,7 +46,7 @@ from core.config import (
     read_setting_int,
     runtime_log_path,
 )
-from core.theme import ThemeEngine
+from core.theme import THEME_MODES, DEFAULT_THEME_MODE, ThemeEngine
 from services.clipboard_history_service import ClipboardHistoryService
 from services.microphone_recorder import (
     MicrophoneRecorder,
@@ -55,13 +55,16 @@ from services.microphone_recorder import (
 )
 from services.notification_service import NotificationService
 
+# UI
+from services.process_snapshot import ProcessSnapshot
+from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_to_live
+
 # Services
 from services.resource_manager import (
     load_active_aggressive_profile,
     load_active_smart_profile,
     release_resources,
 )
-from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_to_live
 from services.shortcut_service import ShortcutService
 from services.system_info import (
     foreground_is_fullscreen,
@@ -71,21 +74,28 @@ from services.system_info import (
     get_ram_temp,
     prime_process_cpu,
 )
-# UI
-from services.process_snapshot import ProcessSnapshot
 from ui.battery_widget import BatteryWidget
 from ui.cleanup_history_dialog import open_cleanup_history_dialog
 from ui.cleanup_result_dialog import open_cleanup_result_dialog
 from ui.clipboard_popup import ClipboardHistoryPopup
+from ui.cmdline_kill_dialog import open_cmdline_kill_dialog
 from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.recording_settings_dialog import open_recording_settings_dialog
-from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.snapshot_live_cleanup_dialog import select_snapshot_extra_processes
+from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
-from ui.widgets import CPUBarWidget, ScopeWidget
+from ui.widgets import CPUBarWidget, DragHandle, ScopeWidget
+
+# Layout density presets — (margin_h, margin_v, spacing, scope_min_width, btn_size)
+LAYOUT_PRESETS: dict[str, tuple[int, int, int, int, int]] = {
+    "compact":  (4, 2, 4,  50, 18),
+    "standard": (10, 5, 12, 70, 24),
+    "roomy":    (14, 8, 18, 100, 28),
+}
+DEFAULT_LAYOUT_MODE = "standard"
 
 LOGGER = logging.getLogger(__name__)
 
@@ -206,6 +216,22 @@ class TaskbarMonitor(QWidget):
 
         self.menu_handler = ContextMenuHandler(self)
 
+        # Theme — load saved mode, register paint/restyle listener, hook OS scheme changes
+        saved_theme = self.settings.value("theme_mode", DEFAULT_THEME_MODE)
+        if not isinstance(saved_theme, str) or saved_theme not in THEME_MODES:
+            saved_theme = DEFAULT_THEME_MODE
+        ThemeEngine.set_mode(saved_theme)
+        ThemeEngine.add_listener(self._on_theme_changed)
+        try:
+            from PyQt6.QtGui import QGuiApplication
+            hints = QGuiApplication.styleHints()
+            if hints is not None and hasattr(hints, "colorSchemeChanged"):
+                hints.colorSchemeChanged.connect(
+                    lambda _scheme: ThemeEngine.system_scheme_changed()
+                )
+        except (ImportError, AttributeError, RuntimeError):
+            pass
+
         # Probe optional capabilities before building UI
         self._gpu_available = get_gpu_stats().available
         self._battery_available = get_battery() is not None
@@ -255,6 +281,7 @@ class TaskbarMonitor(QWidget):
             on_show_processes=self.show_processes_popup,
             on_show_clipboard=self.show_clipboard_popup,
             on_show_snapshots=self.show_snapshot_manager,
+            on_show_cmdline_kill=self.show_cmdline_kill_dialog,
             on_show_cleanup_history=self.show_cleanup_history,
             get_is_recording=lambda: self.is_microphone_recording(),
             on_toggle_recording=self.toggle_microphone_recording,
@@ -432,44 +459,12 @@ class TaskbarMonitor(QWidget):
         self.main_layout.setContentsMargins(10, 5, 10, 5)
         self.main_layout.setSpacing(12)
 
-        btn_style = """
-            QPushButton {
-                background-color: rgba(40, 40, 40, 200);
-                color: #55efc4;
-                border: 1px solid #444;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background-color: rgba(70, 70, 70, 220);
-                border-color: #55efc4;
-            }
-            QPushButton:pressed {
-                background-color: rgba(85, 239, 196, 60);
-            }
-            QPushButton:disabled {
-                color: #fdcb6e;
-                background-color: rgba(60, 60, 60, 180);
-            }
-        """
-        recording_btn_style = """
-            QPushButton {
-                background-color: rgba(60, 25, 25, 220);
-                color: #ff7675;
-                border: 1px solid #ff7675;
-                border-radius: 4px;
-                font-size: 13px;
-                padding: 0;
-            }
-            QPushButton:hover {
-                background-color: rgba(85, 35, 35, 235);
-                border-color: #fab1a0;
-            }
-            QPushButton:pressed {
-                background-color: rgba(255, 118, 117, 70);
-            }
-        """
+        self.drag_handle = DragHandle(self)
+        self.main_layout.addWidget(self.drag_handle)
+
+        theme = ThemeEngine.current()
+        btn_style = theme.button_qss
+        recording_btn_style = theme.mic_recording_qss
         self._mic_button_idle_style = btn_style
         self._mic_button_recording_style = recording_btn_style
 
@@ -565,6 +560,82 @@ class TaskbarMonitor(QWidget):
         self.countdown_timer.setFixedWidth(72)
         self.main_layout.addWidget(self.countdown_timer)
 
+        self._apply_scope_visibility()
+        self._apply_layout_mode(self.get_layout_mode())
+
+    # ------------------------------------------------------------------
+    # Scope visibility & layout density
+    # ------------------------------------------------------------------
+    def is_scope_visible(self, key: str) -> bool:
+        """Return whether the given scope is currently shown (default True)."""
+        return bool(read_setting_int(self.settings, f"scope_visible_{key}", 1))
+
+    def set_scope_visible(self, key: str, visible: bool) -> None:
+        """Persist and apply visibility for a single scope."""
+        self.settings.setValue(f"scope_visible_{key}", 1 if visible else 0)
+        self.settings.sync()
+        self._apply_scope_visibility()
+
+    def _apply_scope_visibility(self) -> None:
+        for key, scope in self.scopes.items():
+            scope.setVisible(self.is_scope_visible(key))
+
+    # ------------------------------------------------------------------
+    # Theme
+    # ------------------------------------------------------------------
+    def get_theme_mode(self) -> str:
+        return ThemeEngine.get_mode()
+
+    def set_theme_mode(self, mode: str) -> None:
+        if mode not in THEME_MODES:
+            return
+        self.settings.setValue("theme_mode", mode)
+        self.settings.sync()
+        ThemeEngine.set_mode(mode)
+
+    def _on_theme_changed(self, theme) -> None:
+        """Re-apply button styles and trigger repaints when the theme changes."""
+        self._mic_button_idle_style = theme.button_qss
+        self._mic_button_recording_style = theme.mic_recording_qss
+        for btn in (self.smart_btn, self.aggressive_btn, self.procs_btn,
+                    self.clipboard_btn, self.snapshot_btn):
+            btn.setStyleSheet(theme.button_qss)
+        if self._microphone_recorder.is_recording:
+            self.mic_btn.setStyleSheet(theme.mic_recording_qss)
+        else:
+            self.mic_btn.setStyleSheet(theme.button_qss)
+        self.update()
+        self.cpu_grid.update()
+        for scope in self.scopes.values():
+            scope.grid_pixmap = None
+            scope.update()
+        if self._battery_available:
+            self.battery_widget.update()
+
+    def get_layout_mode(self) -> str:
+        mode = self.settings.value("layout_mode", DEFAULT_LAYOUT_MODE)
+        if not isinstance(mode, str) or mode not in LAYOUT_PRESETS:
+            return DEFAULT_LAYOUT_MODE
+        return mode
+
+    def set_layout_mode(self, mode: str) -> None:
+        if mode not in LAYOUT_PRESETS:
+            return
+        self.settings.setValue("layout_mode", mode)
+        self.settings.sync()
+        self._apply_layout_mode(mode)
+
+    def _apply_layout_mode(self, mode: str) -> None:
+        margin_h, margin_v, spacing, scope_min_w, btn_size = LAYOUT_PRESETS[mode]
+        self.main_layout.setContentsMargins(margin_h, margin_v, margin_h, margin_v)
+        self.main_layout.setSpacing(spacing)
+        for btn in (self.smart_btn, self.aggressive_btn, self.procs_btn,
+                    self.clipboard_btn, self.snapshot_btn, self.mic_btn):
+            btn.setFixedSize(btn_size, btn_size)
+        for scope in self.scopes.values():
+            scope.setMinimumWidth(scope_min_w)
+        self.adjustSize()
+
     def show_snapshot_manager(self) -> None:
         """Open the process-snapshot manager dialog."""
         open_snapshot_manager(parent=self, on_clean=self._clean_using_snapshot)
@@ -572,6 +643,10 @@ class TaskbarMonitor(QWidget):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
         open_cleanup_history_dialog(parent=self)
+
+    def show_cmdline_kill_dialog(self) -> None:
+        """Kill processes whose WMI CommandLine matches a saved regex."""
+        open_cmdline_kill_dialog(self.settings, parent=self)
 
     def show_recording_settings(self) -> None:
         """Open the microphone recording settings dialog."""
@@ -837,16 +912,16 @@ class TaskbarMonitor(QWidget):
                     if c_temp is None:
                         c_temp = gpu.temp_c
                     c_temp_f = c_temp * 9 / 5 + 32 if c_temp is not None else None
-                    
+
                     r_temp = get_ram_temp()
                     r_temp_f = r_temp * 9 / 5 + 32 if r_temp is not None else None
-                    
+
                     text = ""
                     if c_temp_f is not None:
                         text += f"CPU: {int(c_temp_f)}°F"
                     if r_temp_f is not None:
                         text += f" RAM: {int(r_temp_f)}°F"
-                    
+
                     self.scopes["temp"].update_value(
                         value=c_temp_f if c_temp_f is not None else 0.0,
                         text=text.strip() if text else "N/A",

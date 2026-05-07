@@ -1,0 +1,8 @@
+exclude = [
+  "^mailto:",
+  "^#",
+  "^id:",
+]
+accept = [200, 206, 429]
+max_retries = 2
+timeout = 20

@@ -1,0 +1,277 @@
+{
+  "archive.2026-04-29.ai-instruction-source": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/ai-instruction-source.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.flutter-optimization": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/flutter-optimization.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.python.performance-playbooks.performance-first-audit-playbook-for-python-projects": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/python/performance-playbooks/performance-first-audit-playbook-for-python-projects.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.python.performance-playbooks.python-performance-audit-playbook": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/python/performance-playbooks/python-performance-audit-playbook.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.python.python-source": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/python/python-source.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.request-source": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/request-source.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.design-rules.golden-rules-for-sql-database-design": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/design-rules/golden-rules-for-sql-database-design.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.design-rules.golden-rules-for-sql-database-design-v1": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/design-rules/golden-rules-for-sql-database-design-v1.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.design-rules.src-golden-rules-for-sql-database-design": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/design-rules/src-golden-rules-for-sql-database-design.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.merge-notes": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/merge-notes.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.performance-playbooks.sql-performance-audit-playbook": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/performance-playbooks/sql-performance-audit-playbook.md",
+    "status": "archived"
+  },
+  "archive.2026-04-29.sql.performance-playbooks.sql-performance-audit-playbook-v1": {
+    "genre": "archive",
+    "path": "archive/2026-04-29/sql/performance-playbooks/sql-performance-audit-playbook-v1.md",
+    "status": "archived"
+  },
+  "archive.legacy-rule-aliases": {
+    "genre": "archive",
+    "path": "archive/legacy-rule-aliases.md",
+    "status": "archived"
+  },
+  "archive.project-memory-move-map": {
+    "genre": "archive",
+    "path": "archive/project-memory-move-map.md",
+    "status": "archived"
+  },
+  "changelog": {
+    "genre": "shared",
+    "path": "CHANGELOG.md",
+    "status": "active"
+  },
+  "consumers": {
+    "genre": "shared",
+    "path": "CONSUMERS.md",
+    "status": "active"
+  },
+  "conventions.frontmatter": {
+    "genre": "convention",
+    "path": "conventions/frontmatter.md",
+    "status": "active"
+  },
+  "conventions.rule-id": {
+    "genre": "convention",
+    "path": "conventions/rule-id.md",
+    "status": "active"
+  },
+  "conventions.voice": {
+    "genre": "convention",
+    "path": "conventions/voice.md",
+    "status": "active"
+  },
+  "glossary": {
+    "genre": "glossary",
+    "path": "glossary.md",
+    "status": "active"
+  },
+  "personas.flutter-engineer": {
+    "genre": "persona",
+    "path": "personas/flutter-engineer.md",
+    "status": "active"
+  },
+  "personas.planner": {
+    "genre": "persona",
+    "path": "personas/planner.md",
+    "status": "active"
+  },
+  "personas.reviewer": {
+    "genre": "persona",
+    "path": "personas/reviewer.md",
+    "status": "active"
+  },
+  "personas.ui-kit-migrator": {
+    "genre": "persona",
+    "path": "personas/ui-kit-migrator.md",
+    "status": "active"
+  },
+  "readme": {
+    "genre": "readme",
+    "path": "README.md",
+    "status": "active"
+  },
+  "routing.model-selection": {
+    "genre": "routing",
+    "path": "routing/model-selection.md",
+    "status": "active"
+  },
+  "shared.handoff-summary": {
+    "genre": "shared",
+    "path": "shared/handoff-summary.md",
+    "status": "active"
+  },
+  "shared.logging": {
+    "genre": "shared",
+    "path": "shared/logging.md",
+    "status": "active"
+  },
+  "shared.secrets": {
+    "genre": "shared",
+    "path": "shared/secrets.md",
+    "status": "active"
+  },
+  "shared.shell-operations": {
+    "genre": "shared",
+    "path": "shared/shell-operations.md",
+    "status": "active"
+  },
+  "shared.source-citations": {
+    "genre": "shared",
+    "path": "shared/source-citations.md",
+    "status": "active"
+  },
+  "shared.token-efficiency": {
+    "genre": "shared",
+    "path": "shared/token-efficiency.md",
+    "status": "active"
+  },
+  "stacks.aws.playbooks.opentofu-restaurant": {
+    "genre": "playbook",
+    "path": "stacks/aws/playbooks/opentofu-restaurant.md",
+    "status": "active"
+  },
+  "stacks.aws.readme": {
+    "genre": "readme",
+    "path": "stacks/aws/README.md",
+    "status": "active"
+  },
+  "stacks.flutter.conventions": {
+    "genre": "convention",
+    "path": "stacks/flutter/conventions.md",
+    "status": "active"
+  },
+  "stacks.flutter.generators.readme": {
+    "genre": "convention",
+    "path": "stacks/flutter/generators/readme.md",
+    "status": "active"
+  },
+  "stacks.flutter.guides.optimization": {
+    "genre": "convention",
+    "path": "stacks/flutter/guides/optimization.md",
+    "status": "active"
+  },
+  "stacks.flutter.guides.separation-of-concerns": {
+    "genre": "convention",
+    "path": "stacks/flutter/guides/separation-of-concerns.md",
+    "status": "active"
+  },
+  "stacks.flutter.playbooks.dockspace-performance": {
+    "genre": "playbook",
+    "path": "stacks/flutter/playbooks/dockspace-performance.md",
+    "status": "active"
+  },
+  "stacks.flutter.playbooks.performance": {
+    "genre": "playbook",
+    "path": "stacks/flutter/playbooks/performance.md",
+    "status": "active"
+  },
+  "stacks.flutter.prompts.package-review": {
+    "genre": "prompt",
+    "path": "stacks/flutter/prompts/package-review.md",
+    "status": "active"
+  },
+  "stacks.flutter.readme": {
+    "genre": "readme",
+    "path": "stacks/flutter/README.md",
+    "status": "active"
+  },
+  "stacks.python.conventions": {
+    "genre": "convention",
+    "path": "stacks/python/conventions.md",
+    "status": "active"
+  },
+  "stacks.python.generators.readme": {
+    "genre": "convention",
+    "path": "stacks/python/generators/readme.md",
+    "status": "active"
+  },
+  "stacks.python.guides.optimization": {
+    "genre": "convention",
+    "path": "stacks/python/guides/optimization.md",
+    "status": "active"
+  },
+  "stacks.python.guides.web-apps": {
+    "genre": "convention",
+    "path": "stacks/python/guides/web-apps.md",
+    "status": "active"
+  },
+  "stacks.python.playbooks.performance": {
+    "genre": "playbook",
+    "path": "stacks/python/playbooks/performance.md",
+    "status": "active"
+  },
+  "stacks.python.prompts.package-review": {
+    "genre": "prompt",
+    "path": "stacks/python/prompts/package-review.md",
+    "status": "active"
+  },
+  "stacks.python.readme": {
+    "genre": "readme",
+    "path": "stacks/python/README.md",
+    "status": "active"
+  },
+  "stacks.readme": {
+    "genre": "readme",
+    "path": "stacks/README.md",
+    "status": "active"
+  },
+  "stacks.sql.playbooks.performance": {
+    "genre": "playbook",
+    "path": "stacks/sql/playbooks/performance.md",
+    "status": "active"
+  },
+  "stacks.sql.readme": {
+    "genre": "readme",
+    "path": "stacks/sql/README.md",
+    "status": "active"
+  },
+  "stacks.sql.reviews.domain-table-rubric": {
+    "genre": "convention",
+    "path": "stacks/sql/reviews/domain-table-rubric.md",
+    "status": "active"
+  },
+  "stacks.sql.rules.design": {
+    "genre": "convention",
+    "path": "stacks/sql/rules/design.md",
+    "status": "active"
+  },
+  "templates.request": {
+    "genre": "template",
+    "path": "templates/request.md",
+    "status": "active"
+  }
+}

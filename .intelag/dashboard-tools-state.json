@@ -1,0 +1,13 @@
+{
+  "installedVersion": null,
+  "installedCommitSha": null,
+  "previousVersion": null,
+  "previousCommitSha": null,
+  "latestVersion": null,
+  "latestCommitSha": null,
+  "lastCheckedAt": "2026-04-30T05:04:10.732Z",
+  "lastUpdatedAt": null,
+  "installPath": ".intelag",
+  "updateStatus": "failed",
+  "lastError": "GitHub token cannot see INTELAG/intelag_vsix_dashboard_tools. Grant repository read access."
+}

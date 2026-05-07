@@ -1,4 +1,4 @@
-"""Create timestamped agent request files from templates and copy prompt to clipboard."""
+"""Create timestamped local agent-memory request files and copy prompts."""
 
 import argparse
 import datetime
@@ -13,6 +13,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_OUTPUT_DIR = ".intelag/.agent/requests"
+DEFAULT_INSTRUCTION_KIT_DIR = ".intelag/.agent"
 TIMESTAMP_FORMAT = "%y%m%d_%H_%M_%S"
 DISPLAY_DATETIME_FORMAT = "%Y-%m-%d %H:%M:%S"
 ALLOWED_FILENAME_CHARS = (" ", ".", "_", "-")
@@ -144,6 +145,7 @@ def create_request(
 def example_usage() -> None:
     """Run a minimal example for manual testing."""
     logger.info("Example: create_request('test_request', '.intelag/.agent/requests')")
+    logger.info("Reusable instruction kit path: %s", DEFAULT_INSTRUCTION_KIT_DIR)
 
 
 def main() -> None:

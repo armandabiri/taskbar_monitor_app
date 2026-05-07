@@ -33,7 +33,7 @@ REQUEST 3:
 
 ---
 RULES:
-    - Strictly apply all rules defined in .intelag.agent\instructions\flutter.md
+    - Strictly apply all rules defined in .intelag\.agent\stacks\flutter\conventions.md
     - Do not skip steps, do not partially complete tasks, and ensure full compliance with the project standards and stability requirements.
     - Process them sequentially, one by one, and fully complete each before moving to the next.
     - Do not ask for confirmation. Execute all my requests without asking for confirmation.
@@ -53,7 +53,7 @@ REQUEST 3:
 
 ---
 RULES:
-    - Strictly apply all rules defined in .intelag.agent\instructions\flutter.md
+    - Strictly apply all rules defined in .intelag\.agent\stacks\flutter\conventions.md
     - Do not skip steps, do not partially complete tasks, and ensure full compliance with the project standards and stability requirements.
     - Process them sequentially, one by one, and fully complete each before moving to the next.
     - Do not ask for confirmation. Execute all my requests without asking for confirmation.
@@ -89,7 +89,7 @@ REQUEST 3:
 
 ---
 RULES:
-    - Strictly apply all rules defined in .intelag.agent\instructions\flutter.md
+    - Strictly apply all rules defined in .intelag\.agent\stacks\flutter\conventions.md
     - Do not skip steps, do not partially complete tasks, and ensure full compliance with the project standards and stability requirements.
     - Process them sequentially, one by one, and fully complete each before moving to the next.
     - Do not ask for confirmation. Execute all my requests without asking for confirmation.

@@ -1,0 +1,13 @@
+{
+  "installedVersion": "v1.0.1",
+  "installedCommitSha": "0907eba770be52969a951a5afbdbffd45c324545",
+  "previousVersion": "v1.0.1",
+  "previousCommitSha": "0907eba770be52969a951a5afbdbffd45c324545",
+  "latestVersion": "v1.0.1",
+  "latestCommitSha": "0907eba770be52969a951a5afbdbffd45c324545",
+  "lastCheckedAt": "2026-04-30T05:04:41.374Z",
+  "lastUpdatedAt": "2026-04-30T05:04:42.355Z",
+  "installPath": ".intelag/.agent",
+  "updateStatus": "updated",
+  "lastError": null
+}

@@ -1,0 +1,14 @@
+{
+  "schemaVersion": 1,
+  "kind": "intelag.encryptedGithubToken",
+  "algorithm": "AES-256-GCM",
+  "kdf": {
+    "name": "PBKDF2-SHA256",
+    "iterations": 310000,
+    "salt": "zZPJiufMF3NFt3vcjeyljQ=="
+  },
+  "createdAt": "2026-04-30T03:45:58.504Z",
+  "iv": "gf5yW799DqMFsKBI",
+  "tag": "k+02o3l8YexveoTs05xjRQ==",
+  "ciphertext": "I3lmpQqMwaO5qIMQT6mAX6YH5J8ttBG9qge+JJhbcg7TS5LwsmG4LpEUQR56bPEcaMk8fYOuy2o6nAZFfBep5ayYkCmu0Ie5rk19RVG7JopzBVlwpCkM9kbC/htUO1RSvPQtZpe2w8QbZrrb7vIkMyqnaOc4LM8BpkAAQLUl9/oaVS/liAmCNnngPwAqJnYOva9wPVl1blGfUWbDsZoBZk0rxTPOxOdIXKAXWV/EwPl0jSkG"
+}

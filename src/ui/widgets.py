@@ -11,6 +11,8 @@ from PyQt6.QtGui import (
     QPaintEvent,
     QResizeEvent,
 )
+from PyQt6.QtCore import QPoint
+from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QWidget
 from core.config import (
     CPU_CELL_SIZE,
@@ -29,10 +31,62 @@ from core.config import (
     SCOPE_LABEL_FONT,
     SCOPE_LABEL_FONT_SIZE,
     SCOPE_TEXT_SHADOW_ALPHA,
-    SCOPE_GRID_ALPHA,
     MIN_AUTOSCALE,
 )
 from core.theme import ThemeEngine
+
+
+class DragHandle(QWidget):
+    """Small grip widget that drags its top-level window on left-press+move."""
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(8, 24)
+        self.setCursor(Qt.CursorShape.SizeAllCursor)
+        self.setToolTip("Drag to move window")
+        self._drag_offset: QPoint | None = None
+
+    def mousePressEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+        if a0 is None or a0.button() != Qt.MouseButton.LeftButton:
+            return
+        win = self.window()
+        if win is None:
+            return
+        self._drag_offset = a0.globalPosition().toPoint() - win.pos()
+        a0.accept()
+
+    def mouseMoveEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+        if a0 is None or self._drag_offset is None:
+            return
+        win = self.window()
+        if win is None:
+            return
+        win.move(a0.globalPosition().toPoint() - self._drag_offset)
+        a0.accept()
+
+    def mouseReleaseEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+        self._drag_offset = None
+        win = self.window()
+        save = getattr(win, "save_geometry", None)
+        if callable(save):
+            save()
+        if a0 is not None:
+            a0.accept()
+
+    def paintEvent(self, a0: QPaintEvent | None) -> None:  # pylint: disable=invalid-name
+        del a0
+        painter = QPainter(self)
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QColor(255, 255, 255, 60))
+        w = self.width()
+        h = self.height()
+        dot = 2
+        gap = 3
+        col_x = (w - dot) // 2
+        n = max(1, (h - 4) // (dot + gap))
+        start_y = (h - (n * (dot + gap) - gap)) // 2
+        for i in range(n):
+            painter.drawRect(col_x, start_y + i * (dot + gap), dot, dot)
 
 
 class CPUBarWidget(QWidget):
@@ -46,6 +100,8 @@ class CPUBarWidget(QWidget):
         self.spacing = CPU_CELL_SPACING
         self.rows = CPU_GRID_ROWS
         self.setFixedHeight(self.rows * (self.cell_size + self.spacing))
+        # Pass mouse events through to parent so window dragging works over the grid.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
     def update_usage(self, cores: list[float]) -> None:
         """Update core usage values and trigger a repaint."""
@@ -85,6 +141,8 @@ class ScopeWidget(QWidget):
         """Initialize a scope widget with label and line color."""
         super().__init__(parent)
         self.setMinimumSize(SCOPE_MIN_WIDTH, SCOPE_MIN_HEIGHT)
+        # Pass mouse events through so the parent window can be dragged from anywhere over the scope.
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
         self.history: list[float] = [0.0] * SCOPE_HISTORY_SIZE
         self.secondary_history: list[float | None] = [None] * SCOPE_HISTORY_SIZE
         self.label = label
@@ -162,11 +220,12 @@ class ScopeWidget(QWidget):
         width = self.width()
         height = self.height()
 
+        theme = ThemeEngine.current()
         if self.grid_pixmap is None or self.grid_pixmap.size() != self.size():
             self.grid_pixmap = QPixmap(self.size())
             self.grid_pixmap.fill(Qt.GlobalColor.transparent)
             grid_painter = QPainter(self.grid_pixmap)
-            grid_painter.setPen(QPen(QColor(255, 255, 255, SCOPE_GRID_ALPHA), 1))
+            grid_painter.setPen(QPen(theme.grid_color, 1))
             for x_pos in range(0, width + 1, SCOPE_GRID_X_STEP):
                 grid_painter.drawLine(x_pos, 0, x_pos, height)
             for y_pos in range(0, height + 1, SCOPE_GRID_Y_STEP):
@@ -201,16 +260,18 @@ class ScopeWidget(QWidget):
         text_rect = self.rect().adjusted(0, 0, 0, -2)
         align = Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignHCenter
 
-        painter.setPen(QColor(0, 0, 0, SCOPE_TEXT_SHADOW_ALPHA))
+        shadow = QColor(theme.text_shadow)
+        shadow.setAlpha(SCOPE_TEXT_SHADOW_ALPHA)
+        painter.setPen(shadow)
         painter.drawText(text_rect.translated(1, 1), align, full_text)
-        painter.setPen(QColor(255, 255, 255))
+        painter.setPen(theme.text)
         painter.drawText(text_rect, align, full_text)
 
         if self.top_right_text:
             tr_rect = self.rect().adjusted(0, 2, -2, 0)
             tr_align = Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignRight
-            painter.setPen(QColor(0, 0, 0, SCOPE_TEXT_SHADOW_ALPHA))
+            painter.setPen(shadow)
             painter.drawText(tr_rect.translated(1, 1), tr_align, self.top_right_text)
-            painter.setPen(QColor(255, 255, 255))
+            painter.setPen(theme.text)
             painter.drawText(tr_rect, tr_align, self.top_right_text)
 

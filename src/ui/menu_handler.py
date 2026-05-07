@@ -82,6 +82,9 @@ class MonitorProtocol(Protocol):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
 
+    def show_cmdline_kill_dialog(self) -> None:
+        """Open kill-by-WMI-command-line dialog."""
+
     def is_microphone_recording(self) -> bool:
         """Return whether microphone recording is active."""
 
@@ -96,6 +99,27 @@ class MonitorProtocol(Protocol):
 
     def reload_resource_profiles(self) -> None:
         """Reload smart/aggressive profile bindings from settings."""
+
+    def is_scope_visible(self, key: str) -> bool:
+        """Return whether a scope is shown."""
+        ...
+
+    def set_scope_visible(self, key: str, visible: bool) -> None:
+        """Toggle a scope's visibility."""
+
+    def get_layout_mode(self) -> str:
+        """Return the active layout density mode."""
+        ...
+
+    def set_layout_mode(self, mode: str) -> None:
+        """Set the layout density mode."""
+
+    def get_theme_mode(self) -> str:
+        """Return the active theme mode (system/light/dark)."""
+        ...
+
+    def set_theme_mode(self, mode: str) -> None:
+        """Set the active theme mode."""
 
 
 class AppMenuBuilder:
@@ -173,6 +197,11 @@ class AppMenuBuilder:
             snapshot_action.triggered.connect(parent.show_snapshot_manager)
         menu.addAction(snapshot_action)
 
+        cmdline_kill_action = QAction("Kill by Command Line (WMI)…", parent)
+        if isinstance(parent, MonitorProtocol):
+            cmdline_kill_action.triggered.connect(parent.show_cmdline_kill_dialog)
+        menu.addAction(cmdline_kill_action)
+
         if isinstance(parent, MonitorProtocol):
             AppMenuBuilder._add_recording_submenu(menu, parent)
 
@@ -184,6 +213,18 @@ class AppMenuBuilder:
         # Resource cleanup submenu — profile picker + settings dialog
         if isinstance(parent, MonitorProtocol):
             AppMenuBuilder._add_resource_cleanup_submenu(menu, parent)
+
+        # Graph visibility submenu
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_graphs_submenu(menu, parent)
+
+        # Layout density submenu
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_layout_submenu(menu, parent)
+
+        # Theme submenu
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_theme_submenu(menu, parent)
 
         # Click-through toggle (Ctrl+Shift+Alt+C acts as an escape hatch)
         click_through_action = QAction("Click-Through Mode [Ctrl+Shift+Alt+C]", parent)
@@ -303,6 +344,57 @@ class AppMenuBuilder:
             cleanup_menu.addAction(action)
 
     @staticmethod
+    def _add_graphs_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Submenu of checkable items to show/hide each scope graph."""
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        graphs_menu = QMenu("Graphs", widget_parent)
+        menu.addMenu(graphs_menu)
+        labels = [
+            ("cpu", "CPU"), ("ram", "RAM"), ("up", "Upload"), ("dn", "Download"),
+            ("r/w", "Disk R/W"), ("gpu", "GPU"), ("vram", "VRAM"), ("temp", "Temp"),
+        ]
+        for key, label in labels:
+            action = QAction(label, widget_parent)
+            action.setCheckable(True)
+            action.setChecked(parent.is_scope_visible(key))
+            action.toggled.connect(_make_scope_toggler(parent, key))
+            graphs_menu.addAction(action)
+
+    @staticmethod
+    def _add_layout_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Submenu of layout density modes."""
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        layout_menu = QMenu("Layout", widget_parent)
+        menu.addMenu(layout_menu)
+        active = parent.get_layout_mode()
+        group = QActionGroup(layout_menu)
+        group.setExclusive(True)
+        for mode, label in (("compact", "Compact"), ("standard", "Standard"), ("roomy", "Roomy")):
+            action = QAction(label, widget_parent)
+            action.setCheckable(True)
+            action.setChecked(mode == active)
+            action.triggered.connect(_make_layout_picker(parent, mode))
+            group.addAction(action)
+            layout_menu.addAction(action)
+
+    @staticmethod
+    def _add_theme_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Submenu of theme modes: System / Light / Dark."""
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        theme_menu = QMenu("Theme", widget_parent)
+        menu.addMenu(theme_menu)
+        active = parent.get_theme_mode()
+        group = QActionGroup(theme_menu)
+        group.setExclusive(True)
+        for mode, label in (("system", "System (auto)"), ("light", "Light"), ("dark", "Dark")):
+            action = QAction(label, widget_parent)
+            action.setCheckable(True)
+            action.setChecked(mode == active)
+            action.triggered.connect(_make_theme_picker(parent, mode))
+            group.addAction(action)
+            theme_menu.addAction(action)
+
+    @staticmethod
     def _add_recording_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
         """Build the microphone-recording submenu."""
         widget_parent = parent if isinstance(parent, QWidget) else None
@@ -321,6 +413,24 @@ class AppMenuBuilder:
         settings_action = QAction("Settings…", widget_parent)
         settings_action.triggered.connect(lambda _checked=False: parent.show_recording_settings())
         recording_menu.addAction(settings_action)
+
+
+def _make_scope_toggler(parent: "MonitorProtocol", key: str):
+    def handler(checked: bool) -> None:
+        parent.set_scope_visible(key, checked)
+    return handler
+
+
+def _make_layout_picker(parent: "MonitorProtocol", mode: str):
+    def handler(_checked: bool = False) -> None:
+        parent.set_layout_mode(mode)
+    return handler
+
+
+def _make_theme_picker(parent: "MonitorProtocol", mode: str):
+    def handler(_checked: bool = False) -> None:
+        parent.set_theme_mode(mode)
+    return handler
 
 
 def _make_picker(on_pick, profile_name: str):
