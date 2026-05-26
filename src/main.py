@@ -73,6 +73,8 @@ from services.system_info import (
     get_gpu_stats,
     get_ram_temp,
     prime_process_cpu,
+    start_background_pollers,
+    stop_background_pollers,
 )
 from ui.battery_widget import BatteryWidget
 from ui.cleanup_history_dialog import open_cleanup_history_dialog
@@ -252,10 +254,12 @@ class TaskbarMonitor(QWidget):
         self.timer.timeout.connect(self._check_fullscreen_autohide)
         self.timer.start(self.interval)
 
-        # Topmost enforcement runs on its own fast, fixed-rate timer so that
-        # a slow (Eco) stats interval doesn't let the Win11 taskbar get above us.
+        # Topmost enforcement: nativeEvent rewrites WM_WINDOWPOSCHANGING in
+        # real time so this timer only exists as a safety net for cases where
+        # no Z-order change message is generated (rare). 500ms was overkill —
+        # 2s keeps DWM/Z-order recompute cost off the hot path.
         self.topmost_timer = QTimer(self)
-        self.topmost_timer.setInterval(500)
+        self.topmost_timer.setInterval(2000)
         self.topmost_timer.timeout.connect(self._enforce_topmost)
         self.topmost_timer.start()
 
@@ -1121,6 +1125,7 @@ class TaskbarMonitor(QWidget):
             except MicrophoneRecorderError:
                 LOGGER.exception("Failed to stop microphone recording during shutdown")
         self.shortcut_service.unregister_all()
+        stop_background_pollers()
         if self.tray is not None:
             self.tray.hide()
         super().closeEvent(a0)
@@ -1157,6 +1162,8 @@ def main() -> int:
     # hundreds of processes (this only affects the first sample of the Top
     # Processes popup, which already shows a "Loading…" placeholder).
     QTimer.singleShot(0, prime_process_cpu)
+    # Background LHM/temperature poller — keeps HTTP off the UI thread.
+    QTimer.singleShot(0, start_background_pollers)
     return app.exec()
 
 

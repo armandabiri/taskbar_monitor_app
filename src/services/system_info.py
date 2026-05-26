@@ -89,13 +89,26 @@ class ProcessRow:
 # ---------------------------------------------------------------------------
 # Collectors
 # ---------------------------------------------------------------------------
+# NVML calls aren't free — at "Ultra" 100 ms intervals three of them per tick
+# is noticeable. Cache results for a short window so fast UI rates don't
+# multiply NVML cost.
+_GPU_CACHE_TTL = 0.45
+_gpu_cache: GPUStats = GPUStats()
+_gpu_cache_at = 0.0
+
+
 def get_gpu_stats() -> GPUStats:
     """Return GPU stats for device 0. Safe if NVML not installed."""
+    global _gpu_cache, _gpu_cache_at
     if _NVML is None:
         return GPUStats()
     _init_nvml()
     if not _NVML_READY or _NVML_HANDLE is None:
         return GPUStats()
+
+    now = time.monotonic()
+    if now - _gpu_cache_at < _GPU_CACHE_TTL:
+        return _gpu_cache
 
     stats = GPUStats()
     try:
@@ -115,6 +128,8 @@ def get_gpu_stats() -> GPUStats:
         )
     except Exception as exc:  # pylint: disable=broad-exception-caught
         LOGGER.debug("GPU temp query failed: %s", exc)
+    _gpu_cache = stats
+    _gpu_cache_at = now
     return stats
 
 
@@ -171,51 +186,133 @@ def get_pdh_cpu_temp() -> float | None:
 
 import urllib.request
 import json
+import threading
 import time
 
-_LHM_CACHE: dict = {}
-_LHM_LAST_FETCH = 0.0
+# ---------------------------------------------------------------------------
+# LibreHardwareMonitor (LHM) telemetry — background poller
+#
+# LHM exposes a JSON tree at http://127.0.0.1:8085/data.json. Previously the
+# UI thread fetched and walked that tree every stats tick, which blocked on
+# the TCP timeout whenever LHM wasn't running. Now a daemon thread polls in
+# the background and the UI thread only reads cached scalars.
+# ---------------------------------------------------------------------------
+_LHM_POLL_OK_INTERVAL = 2.0       # poll cadence while LHM is responsive
+_LHM_POLL_FAIL_MAX = 60.0         # back off up to this when LHM is down
+_LHM_HTTP_TIMEOUT = 0.5
 
-def _fetch_lhm_data() -> dict:
-    global _LHM_CACHE, _LHM_LAST_FETCH
-    now = time.time()
-    if now - _LHM_LAST_FETCH < 0.5:
-        return _LHM_CACHE
-    try:
-        req = urllib.request.Request("http://127.0.0.1:8085/data.json", method="GET")
-        with urllib.request.urlopen(req, timeout=0.2) as resp:
-            _LHM_CACHE = json.loads(resp.read().decode())
-            _LHM_LAST_FETCH = now
-    except Exception:
-        _LHM_CACHE = {}
-        _LHM_LAST_FETCH = now
-    return _LHM_CACHE
+_CPU_NAME_HINTS = ("CPU PACKAGE", "CORE AVERAGE", "CORE MAX", "CPU CORE")
+_CPU_PARENT_HINTS = ("INTEL", "CPU")
+_RAM_NAME_HINTS = ("DDR", "DIMM", "TEMPERATURE")
+_RAM_PARENT_HINTS = ("MEMORY", "CORSAIR", "DIMM", "DDR")
 
-def _collect_lhm_sensors(data: dict, sensor_type: str, name_hints: list[str], parent_hints: list[str], current_parent: str = "") -> list[float]:
-    temps = []
+
+def _collect_lhm_sensors(
+    data: dict,
+    sensor_type: str,
+    name_hints: tuple[str, ...],
+    parent_hints: tuple[str, ...],
+    current_parent: str = "",
+) -> list[float]:
+    temps: list[float] = []
     name = data.get("Text", "").upper()
-    my_type = data.get("Type", "")
-    
-    if my_type == sensor_type:
+    if data.get("Type", "") == sensor_type:
         if any(h in name for h in name_hints) or any(h in current_parent for h in parent_hints):
-            val_str = data.get("Value", "").split(" ")[0].replace(',', '.')
+            val_str = data.get("Value", "").split(" ")[0].replace(",", ".")
             try:
                 temps.append(float(val_str))
             except ValueError:
                 pass
-                
+
+    next_parent = name if not current_parent else current_parent + " " + name
     for child in data.get("Children", []):
-        temps.extend(_collect_lhm_sensors(child, sensor_type, name_hints, parent_hints, name if not current_parent else current_parent + " " + name))
+        temps.extend(
+            _collect_lhm_sensors(child, sensor_type, name_hints, parent_hints, next_parent)
+        )
     return temps
+
+
+class _LhmPoller:
+    """Background poller for LibreHardwareMonitor temperatures.
+
+    Keeping the HTTP fetch off the UI thread is the whole point of this class
+    — when LHM isn't running, the connect attempt can block long enough to
+    visibly stutter the monitor.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cpu_temp: float | None = None
+        self._ram_temp: float | None = None
+        self._available = False
+        self._thread: threading.Thread | None = None
+        self._stop = threading.Event()
+        self._consecutive_failures = 0
+        self._started = False
+
+    def ensure_started(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._thread = threading.Thread(target=self._run, name="lhm-poller", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            wait = self._poll_once()
+            self._stop.wait(wait)
+
+    def _poll_once(self) -> float:
+        try:
+            req = urllib.request.Request("http://127.0.0.1:8085/data.json", method="GET")
+            with urllib.request.urlopen(req, timeout=_LHM_HTTP_TIMEOUT) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception:  # pylint: disable=broad-exception-caught
+            with self._lock:
+                self._cpu_temp = None
+                self._ram_temp = None
+                self._available = False
+            self._consecutive_failures += 1
+            # 2s, 4s, 8s, 16s, 32s, capped at 60s — avoids hammering a closed port.
+            backoff = _LHM_POLL_OK_INTERVAL * (2 ** min(5, self._consecutive_failures))
+            return min(_LHM_POLL_FAIL_MAX, backoff)
+
+        self._consecutive_failures = 0
+        cpu_temps = _collect_lhm_sensors(data, "Temperature", _CPU_NAME_HINTS, _CPU_PARENT_HINTS)
+        ram_temps = _collect_lhm_sensors(data, "Temperature", _RAM_NAME_HINTS, _RAM_PARENT_HINTS)
+        with self._lock:
+            self._cpu_temp = cpu_temps[0] if cpu_temps else None
+            self._ram_temp = (sum(ram_temps) / len(ram_temps)) if ram_temps else None
+            self._available = True
+        return _LHM_POLL_OK_INTERVAL
+
+    def snapshot(self) -> tuple[float | None, float | None, bool]:
+        with self._lock:
+            return self._cpu_temp, self._ram_temp, self._available
+
+
+_LHM = _LhmPoller()
+
+
+def start_background_pollers() -> None:
+    """Kick off any background telemetry pollers. Idempotent."""
+    _LHM.ensure_started()
+
+
+def stop_background_pollers() -> None:
+    """Stop background telemetry pollers (used on shutdown)."""
+    _LHM.stop()
 
 
 def get_cpu_temp() -> float | None:
     """Return a CPU temperature reading if any sensor is available."""
-    lhm_data = _fetch_lhm_data()
-    if lhm_data:
-        temps = _collect_lhm_sensors(lhm_data, "Temperature", ["CPU PACKAGE", "CORE AVERAGE", "CORE MAX", "CPU CORE"], ["INTEL", "CPU"])
-        if temps:
-            return temps[0]
+    _LHM.ensure_started()
+    cpu_temp, _ram_temp, lhm_ok = _LHM.snapshot()
+    if lhm_ok and cpu_temp is not None:
+        return cpu_temp
 
     sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
     if sensors_fn is not None:
@@ -233,16 +330,16 @@ def get_cpu_temp() -> float | None:
     pdh_temp = get_pdh_cpu_temp()
     if pdh_temp is not None:
         return pdh_temp
-        
+
     return None
+
 
 def get_ram_temp() -> float | None:
     """Return average RAM temperature if DDR/DIMM sensors are available."""
-    lhm_data = _fetch_lhm_data()
-    if lhm_data:
-        temps = _collect_lhm_sensors(lhm_data, "Temperature", ["DDR", "DIMM", "TEMPERATURE"], ["MEMORY", "CORSAIR", "DIMM", "DDR"])
-        if temps:
-            return sum(temps) / len(temps)
+    _LHM.ensure_started()
+    _cpu_temp, ram_temp, lhm_ok = _LHM.snapshot()
+    if lhm_ok and ram_temp is not None:
+        return ram_temp
 
     sensors_fn: Callable[[], dict] | None = getattr(psutil, "sensors_temperatures", None)
     if sensors_fn is not None:
@@ -265,19 +362,35 @@ def get_ram_temp() -> float | None:
     return None
 
 
+# Battery state changes slowly — cache and refresh at most every few seconds
+# rather than calling psutil.sensors_battery() on every UI tick.
+_BATTERY_CACHE_TTL = 5.0
+_battery_last_value: BatteryStats | None = None
+_battery_last_fetched = 0.0
+
+
 def get_battery() -> BatteryStats | None:
     """Return battery snapshot, or None when no battery is present."""
+    global _battery_last_value, _battery_last_fetched
+    now = time.monotonic()
+    if now - _battery_last_fetched < _BATTERY_CACHE_TTL:
+        return _battery_last_value
     try:
         bat = psutil.sensors_battery()
     except (OSError, AttributeError):
+        _battery_last_value = None
+        _battery_last_fetched = now
         return None
     if bat is None:
-        return None
-    return BatteryStats(
-        percent=float(bat.percent),
-        plugged=bool(bat.power_plugged),
-        secs_left=int(bat.secsleft) if bat.secsleft is not None else -2,
-    )
+        _battery_last_value = None
+    else:
+        _battery_last_value = BatteryStats(
+            percent=float(bat.percent),
+            plugged=bool(bat.power_plugged),
+            secs_left=int(bat.secsleft) if bat.secsleft is not None else -2,
+        )
+    _battery_last_fetched = now
+    return _battery_last_value
 
 
 TOP_PROC_MIN_RSS_MB = 10.0  # below this a process is never a "top" candidate
