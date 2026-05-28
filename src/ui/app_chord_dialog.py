@@ -47,6 +47,15 @@ QGroupBox {
 QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #aaa; }
 QLabel { color: #ccc; }
 QLabel#hint { color: #888; font-size: 11px; }
+QLabel#recordPreview {
+    color: #55efc4;
+    background-color: #111;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+    padding: 18px;
+    font-family: Consolas, monospace;
+    font-size: 18px;
+}
 QLineEdit {
     background-color: #2a2a2a; color: #eee; border: 1px solid #444;
     border-radius: 3px; padding: 4px 8px; min-width: 160px;
@@ -63,9 +72,6 @@ QPushButton {
 }
 QPushButton:hover { background-color: #3a3a3a; border-color: #55efc4; }
 QPushButton:pressed { background-color: #4a4a4a; }
-QPushButton[recording="true"] {
-    background-color: #4a2a2a; border-color: #ff7675; color: #ffd5d5;
-}
 """
 
 # Qt key codes that should be ignored when capturing a "main" key.
@@ -82,9 +88,19 @@ def _qt_key_to_name(event: QKeyEvent) -> str:
     Resolves the key by Qt key code first so chords like Ctrl+M work — when
     a Ctrl modifier is held, ``event.text()`` returns a control character
     (e.g. ``"\\x0d"`` for Ctrl+M) which fails ``isprintable()`` and would
-    otherwise drop the keystroke.
+    otherwise drop the keystroke. Returns "" if the key cannot be named in
+    a form the ``keyboard`` library understands.
     """
     key = Qt.Key(event.key())
+    mods = event.modifiers()
+    on_keypad = bool(mods & Qt.KeyboardModifier.KeypadModifier)
+
+    # Numpad keys — Qt reports them with KeypadModifier set. Use the
+    # ``num <key>`` names that the keyboard library accepts.
+    if on_keypad:
+        npad = _NUMPAD_NAMES.get(key)
+        if npad:
+            return npad
 
     # Letter keys A–Z
     if Qt.Key.Key_A <= key <= Qt.Key.Key_Z:
@@ -98,40 +114,8 @@ def _qt_key_to_name(event: QKeyEvent) -> str:
     if Qt.Key.Key_F1 <= key <= Qt.Key.Key_F24:
         return f"f{int(key) - int(Qt.Key.Key_F1) + 1}"
 
-    # Named non-printable keys
-    name_map: dict[Qt.Key, str] = {
-        Qt.Key.Key_Space: "space",
-        Qt.Key.Key_Tab: "tab",
-        Qt.Key.Key_Backtab: "tab",
-        Qt.Key.Key_Return: "enter",
-        Qt.Key.Key_Enter: "enter",
-        Qt.Key.Key_Escape: "esc",
-        Qt.Key.Key_Backspace: "backspace",
-        Qt.Key.Key_Delete: "delete",
-        Qt.Key.Key_Insert: "insert",
-        Qt.Key.Key_Home: "home",
-        Qt.Key.Key_End: "end",
-        Qt.Key.Key_PageUp: "page up",
-        Qt.Key.Key_PageDown: "page down",
-        Qt.Key.Key_Left: "left",
-        Qt.Key.Key_Right: "right",
-        Qt.Key.Key_Up: "up",
-        Qt.Key.Key_Down: "down",
-        Qt.Key.Key_Plus: "+",
-        Qt.Key.Key_Minus: "-",
-        Qt.Key.Key_Equal: "=",
-        Qt.Key.Key_Comma: ",",
-        Qt.Key.Key_Period: ".",
-        Qt.Key.Key_Slash: "/",
-        Qt.Key.Key_Backslash: "\\",
-        Qt.Key.Key_Semicolon: ";",
-        Qt.Key.Key_Apostrophe: "'",
-        Qt.Key.Key_BracketLeft: "[",
-        Qt.Key.Key_BracketRight: "]",
-        Qt.Key.Key_QuoteLeft: "`",
-    }
-    if key in name_map:
-        return name_map[key]
+    if key in _NAMED_KEYS:
+        return _NAMED_KEYS[key]
 
     # Last-resort fallback: use event.text() for punctuation we didn't map.
     text = event.text()
@@ -142,55 +126,213 @@ def _qt_key_to_name(event: QKeyEvent) -> str:
     return ""
 
 
+# Named non-printable, lock, media, and browser keys. Values must be names the
+# `keyboard` Python library accepts (probed against keyboard.add_hotkey).
+_NAMED_KEYS: dict[Qt.Key, str] = {
+    # Navigation / editing
+    Qt.Key.Key_Space: "space",
+    Qt.Key.Key_Tab: "tab",
+    Qt.Key.Key_Backtab: "tab",
+    Qt.Key.Key_Return: "enter",
+    Qt.Key.Key_Enter: "enter",
+    Qt.Key.Key_Escape: "esc",
+    Qt.Key.Key_Backspace: "backspace",
+    Qt.Key.Key_Delete: "delete",
+    Qt.Key.Key_Insert: "insert",
+    Qt.Key.Key_Home: "home",
+    Qt.Key.Key_End: "end",
+    Qt.Key.Key_PageUp: "page up",
+    Qt.Key.Key_PageDown: "page down",
+    Qt.Key.Key_Left: "left",
+    Qt.Key.Key_Right: "right",
+    Qt.Key.Key_Up: "up",
+    Qt.Key.Key_Down: "down",
+    # Punctuation
+    Qt.Key.Key_Plus: "+",
+    Qt.Key.Key_Minus: "-",
+    Qt.Key.Key_Equal: "=",
+    Qt.Key.Key_Comma: ",",
+    Qt.Key.Key_Period: ".",
+    Qt.Key.Key_Slash: "/",
+    Qt.Key.Key_Backslash: "\\",
+    Qt.Key.Key_Semicolon: ";",
+    Qt.Key.Key_Apostrophe: "'",
+    Qt.Key.Key_BracketLeft: "[",
+    Qt.Key.Key_BracketRight: "]",
+    Qt.Key.Key_QuoteLeft: "`",
+    # Locks
+    Qt.Key.Key_CapsLock: "caps lock",
+    Qt.Key.Key_NumLock: "num lock",
+    Qt.Key.Key_ScrollLock: "scroll lock",
+    # System
+    Qt.Key.Key_Print: "print screen",
+    Qt.Key.Key_Pause: "pause",
+    # Media
+    Qt.Key.Key_VolumeUp: "volume up",
+    Qt.Key.Key_VolumeDown: "volume down",
+    Qt.Key.Key_VolumeMute: "volume mute",
+    Qt.Key.Key_MediaPlay: "play/pause media",
+    Qt.Key.Key_MediaPause: "play/pause media",
+    Qt.Key.Key_MediaTogglePlayPause: "play/pause media",
+    Qt.Key.Key_MediaStop: "stop media",
+    Qt.Key.Key_MediaNext: "next track",
+    Qt.Key.Key_MediaPrevious: "previous track",
+    # Browser
+    Qt.Key.Key_Back: "browser back",
+    Qt.Key.Key_Forward: "browser forward",
+    Qt.Key.Key_Refresh: "browser refresh",
+    Qt.Key.Key_Stop: "browser stop",
+    Qt.Key.Key_Favorites: "browser favorites",
+}
+
+# Numpad-specific names. The Qt key code is the same as the equivalent
+# main-keyboard key — what distinguishes them is the KeypadModifier flag.
+_NUMPAD_NAMES: dict[Qt.Key, str] = {
+    Qt.Key.Key_0: "num 0",
+    Qt.Key.Key_1: "num 1",
+    Qt.Key.Key_2: "num 2",
+    Qt.Key.Key_3: "num 3",
+    Qt.Key.Key_4: "num 4",
+    Qt.Key.Key_5: "num 5",
+    Qt.Key.Key_6: "num 6",
+    Qt.Key.Key_7: "num 7",
+    Qt.Key.Key_8: "num 8",
+    Qt.Key.Key_9: "num 9",
+    Qt.Key.Key_Plus: "num plus",
+    Qt.Key.Key_Minus: "num -",
+    Qt.Key.Key_Asterisk: "num *",
+    Qt.Key.Key_Slash: "num /",
+    Qt.Key.Key_Period: "decimal",
+    Qt.Key.Key_Enter: "enter",
+}
+
+
 # ----------------------------------------------------------------------------
 # Full-chord capture line edit (records modifiers + main key)
 # ----------------------------------------------------------------------------
 class FullChordLineEdit(QLineEdit):
-    """Captures a full chord (modifiers + key) into the field when recording.
-
-    Used for the prefix shortcut and for mapping triggers/actions — anywhere
-    the user wants to specify the whole combo like ``ctrl+shift+m`` or
-    ``win+alt+m``.
+    """Plain line edit for chord strings. Typing is direct; the parent dialog
+    pops a :class:`RecordShortcutDialog` for live-capture recording.
     """
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self._recording = False
         self.setPlaceholderText("e.g., win+alt+m")
 
-    def is_recording(self) -> bool:
-        return self._recording
 
-    def begin_capture(self) -> None:
-        self._recording = True
-        self.setText("")
-        self.setPlaceholderText("Press the key combination…")
-        self.setFocus(Qt.FocusReason.OtherFocusReason)
+def _qt_modifiers_pretty(mods: Qt.KeyboardModifier) -> list[str]:
+    """Return a list of display-friendly modifier names currently held."""
+    parts: list[str] = []
+    if mods & Qt.KeyboardModifier.MetaModifier:
+        parts.append("Win")
+    if mods & Qt.KeyboardModifier.ControlModifier:
+        parts.append("Ctrl")
+    if mods & Qt.KeyboardModifier.AltModifier:
+        parts.append("Alt")
+    if mods & Qt.KeyboardModifier.ShiftModifier:
+        parts.append("Shift")
+    return parts
 
-    def end_capture(self) -> None:
-        self._recording = False
-        self.setPlaceholderText("e.g., win+alt+m")
+
+class RecordShortcutDialog(QDialog):
+    """Modal panel that captures a chord with a live preview + OK/Cancel.
+
+    The user can press any chord — even one currently registered as a global
+    hotkey — because the parent (manager) dialog pauses the chord service
+    while it is open. Pressing more keys overwrites the captured chord, so
+    re-recording is just pressing again.
+    """
+
+    def __init__(self, title: str, parent: QWidget | None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setStyleSheet(_DIALOG_STYLE)
+        self.setMinimumSize(420, 220)
+        self._captured: str = ""
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(10)
+
+        self._instruction_label = QLabel(
+            "Press the keys you want for this shortcut. Press again to "
+            "overwrite. Click OK when ready."
+        )
+        self._instruction_label.setObjectName("hint")
+        self._instruction_label.setWordWrap(True)
+        layout.addWidget(self._instruction_label)
+
+        self._preview_label = QLabel("…")
+        self._preview_label.setObjectName("recordPreview")
+        self._preview_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._preview_label.setMinimumHeight(60)
+        layout.addWidget(self._preview_label, 1)
+
+        button_box = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        ok_btn = button_box.button(QDialogButtonBox.StandardButton.Ok)
+        if ok_btn is not None:
+            ok_btn.setEnabled(False)
+            ok_btn.setDefault(False)
+            ok_btn.setAutoDefault(False)
+        self._ok_btn = ok_btn
+        button_box.accepted.connect(self.accept)
+        button_box.rejected.connect(self.reject)
+        layout.addWidget(button_box)
+
+        # Capture all key events on the dialog itself rather than a focused
+        # child, so the user doesn't have to think about focus.
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def chord(self) -> str:
+        return self._captured
 
     def keyPressEvent(self, a0: QKeyEvent | None) -> None:  # noqa: N802  pylint: disable=invalid-name
-        if not self._recording or a0 is None:
-            super().keyPressEvent(a0)
+        if a0 is None:
             return
+        # Show held modifiers live, even before the main key is pressed.
         if Qt.Key(a0.key()) in _MODIFIER_QT_KEYS:
+            pretty = _qt_modifiers_pretty(a0.modifiers())
+            self._preview_label.setText(" + ".join(pretty + ["…"]) if pretty else "…")
             a0.accept()
             return
         chord = _qt_event_to_chord(a0)
         if chord:
-            self.setText(chord)
-            self.end_capture()
+            self._captured = chord
+            self._preview_label.setText(_pretty_chord(chord))
+            if self._ok_btn is not None:
+                self._ok_btn.setEnabled(True)
+                self._ok_btn.setDefault(True)
             a0.accept()
-            # Refresh the parent dialog's Record button label, if any.
-            parent = self.parent()
-            while parent is not None and not isinstance(parent, AppChordEditDialog):
-                parent = parent.parent()
-            if isinstance(parent, AppChordEditDialog):
-                parent.refresh_record_button()
             return
-        super().keyPressEvent(a0)
+        # Key fired but we couldn't map it to a name the keyboard library
+        # understands (e.g. vendor-specific G-keys, macro keys, some media
+        # keys the OS doesn't standardize). Tell the user it registered but
+        # can't be used, so they don't think Record is broken.
+        scan = a0.nativeScanCode()
+        vk = a0.nativeVirtualKey()
+        self._preview_label.setText(
+            f"Unrecognized key (scancode {scan}, vk {vk}) — try another"
+        )
+        a0.accept()
+
+    def keyReleaseEvent(self, a0: QKeyEvent | None) -> None:  # noqa: N802  pylint: disable=invalid-name
+        # When all modifiers are released and no chord captured yet, clear preview.
+        if a0 is None:
+            return
+        if not self._captured and Qt.Key(a0.key()) in _MODIFIER_QT_KEYS:
+            pretty = _qt_modifiers_pretty(a0.modifiers())
+            self._preview_label.setText(" + ".join(pretty + ["…"]) if pretty else "…")
+        a0.accept()
+
+
+def record_shortcut(title: str, parent: QWidget | None) -> str:
+    """Open the recorder dialog and return the captured chord, or '' on cancel."""
+    dialog = RecordShortcutDialog(title, parent)
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return ""
+    return dialog.chord()
 
 
 def _qt_event_to_chord(event: QKeyEvent) -> str:
@@ -222,7 +364,7 @@ class PickWindowDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Pick a window")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumSize(640, 480)
+        self.setMinimumSize(640, 600)
         self._selected: WindowInfo | None = None
         self._windows: list[WindowInfo] = []
 
@@ -311,7 +453,7 @@ class AppChordEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("App Chord Shortcut")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumWidth(560)
+        self.setMinimumSize(560, 700)
         self._existing = entry
         self._result: AppChordEntry | None = None
 
@@ -467,20 +609,11 @@ class AppChordEditDialog(QDialog):
             self._mappings = []
 
         self._refresh_mapping_list()
-        self.refresh_record_button()
-
-    def refresh_record_button(self) -> None:
-        recording = self._prefix_chord_edit.is_recording()
-        self._record_btn.setText("Recording…" if recording else "Record")
-        self._record_btn.setProperty("recording", "true" if recording else "false")
-        style = self._record_btn.style()
-        if style is not None:
-            style.unpolish(self._record_btn)
-            style.polish(self._record_btn)
 
     def _begin_capture(self) -> None:
-        self._prefix_chord_edit.begin_capture()
-        self.refresh_record_button()
+        chord = record_shortcut("Record prefix chord", parent=self)
+        if chord:
+            self._prefix_chord_edit.setText(chord)
 
     def _pick_window(self) -> None:
         dialog = PickWindowDialog(self)
@@ -520,11 +653,13 @@ class AppChordEditDialog(QDialog):
             self._mapping_list.addItem(_format_mapping_label(mapping))
 
     def _begin_mapping_capture(self, edit: FullChordLineEdit) -> None:
-        # Cancel any other in-flight capture so only one is active at a time.
-        for other in (self._mapping_trigger_edit, self._mapping_action_edit):
-            if other is not edit and other.is_recording():
-                other.end_capture()
-        edit.begin_capture()
+        title = (
+            "Record your shortcut" if edit is self._mapping_trigger_edit
+            else "Record the app's shortcut"
+        )
+        chord = record_shortcut(title, parent=self)
+        if chord:
+            edit.setText(chord)
 
     def _add_mapping(self) -> None:
         trigger = _normalize_chord(self._mapping_trigger_edit.text())
@@ -617,7 +752,7 @@ class AppChordManagerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("App Chord Shortcuts")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumSize(640, 420)
+        self.setMinimumSize(640, 560)
         self._settings = settings
         self._on_apply = on_apply
         self._entries: list[AppChordEntry] = load_chord_entries(settings)

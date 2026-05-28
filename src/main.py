@@ -667,12 +667,23 @@ class TaskbarMonitor(QWidget):
         open_cmdline_kill_dialog(self.settings, parent=self)
 
     def show_app_chord_manager(self) -> None:
-        """Open the app chord shortcuts manager and reload the service on apply."""
-        open_app_chord_manager(
-            self.settings,
-            on_apply=self._on_app_chord_entries_changed,
-            parent=self,
-        )
+        """Open the app chord shortcuts manager.
+
+        The chord service is paused while the dialog is open so the user can
+        record any chord — including ones currently registered as global
+        hotkeys, which the ``keyboard`` library would otherwise suppress
+        before Qt's keyPressEvent could see them. The service is reloaded
+        from the latest saved state when the dialog closes.
+        """
+        self.app_chord_service.unregister_all()
+        try:
+            open_app_chord_manager(
+                self.settings,
+                on_apply=None,  # don't re-register mid-dialog; we reload on close
+                parent=self,
+            )
+        finally:
+            self._on_app_chord_entries_changed(load_chord_entries(self.settings))
 
     def _on_app_chord_entries_changed(self, entries) -> None:
         """Re-register chord hotkeys after the user edits entries."""
