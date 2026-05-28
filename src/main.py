@@ -4,7 +4,7 @@ import os
 import sys
 
 import psutil
-from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import (
     QContextMenuEvent,
     QDesktopServices,
@@ -48,6 +48,7 @@ from core.config import (
 )
 from core.theme import DEFAULT_THEME_MODE, THEME_MODES, ThemeEngine
 from services.app_chord_service import AppChordService, load_chord_entries
+from services.cleanup_runner import CleanupRunner, provide_kill_response
 from services.clipboard_history_service import ClipboardHistoryService
 from services.microphone_recorder import (
     MicrophoneRecorder,
@@ -64,7 +65,6 @@ from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_t
 from services.resource_manager import (
     load_active_aggressive_profile,
     load_active_smart_profile,
-    release_resources,
 )
 from services.shortcut_service import ShortcutService
 from services.system_info import (
@@ -216,6 +216,10 @@ class TaskbarMonitor(QWidget):
         self._hwnd: int = 0
         self._topmost_applied = False
         self._hidden_for_fullscreen = False
+        # Background cleanup worker state (off-UI release_resources execution).
+        self._cleanup_in_flight: bool = False
+        self._cleanup_thread: QThread | None = None
+        self._cleanup_runner: CleanupRunner | None = None
 
         self.menu_handler = ContextMenuHandler(self)
 
@@ -727,7 +731,13 @@ class TaskbarMonitor(QWidget):
         self._toggle_microphone_recording()
 
     def _clean_using_snapshot(self, snapshot: ProcessSnapshot) -> None:
-        """Preview and kill only the extra processes that appeared after a snapshot."""
+        """Preview and kill only the extra processes that appeared after a snapshot.
+
+        Selection happens on the UI thread (it shows the picker dialog), then
+        the actual cleanup runs on the worker thread so the UI doesn't freeze.
+        """
+        if self._cleanup_in_flight:
+            return
         profile = self._aggressive_profile
         try:
             diff = diff_snapshot_to_live(snapshot)
@@ -746,17 +756,15 @@ class TaskbarMonitor(QWidget):
                 snapshot_matched_count=diff.matched_count,
                 snapshot_identity_collisions=diff.identity_collisions,
             )
-            result = release_resources(
-                profile=profile,
-                scope=scope,
-            )
-            LOGGER.info(
-                "Snapshot-driven cleanup vs '%s': %s", snapshot.name, result.summary,
-            )
-            mode_name = f"{profile.name} Clear (vs '{snapshot.name}')"
-            self._present_cleanup_result(mode_name, result)
         except Exception:  # pylint: disable=broad-exception-caught
-            LOGGER.exception("Snapshot-driven cleanup failed")
+            LOGGER.exception("Snapshot-driven cleanup setup failed")
+            return
+
+        self._start_cleanup_worker(
+            profile=profile,
+            scope=scope,
+            mode_label=f"{profile.name} Clear (vs '{snapshot.name}')",
+        )
 
     def reload_resource_profiles(self) -> None:
         """Re-read smart/aggressive profile bindings from QSettings."""
@@ -850,51 +858,123 @@ class TaskbarMonitor(QWidget):
         return os.path.abspath(os.path.normpath(path))
 
     def _on_release_resources(self, aggressive: bool = False) -> None:
-        """Trigger resource release and flash feedback on the calling button."""
+        """Trigger resource release on a background thread; UI stays responsive.
+
+        ``release_resources`` walks every running process via
+        ``psutil.process_iter`` and performs Win32 working-set/standby
+        operations. Running it on the UI thread froze the app for 5–20s on
+        busy systems. We now drive it from a worker QThread and marshal the
+        optional kill-confirmation dialog back to the UI thread via a
+        queued signal in :class:`services.cleanup_runner.CleanupRunner`.
+        """
+        if getattr(self, "_cleanup_in_flight", False):
+            return  # Re-entry guard: ignore clicks while a cleanup is running.
+
         btn = self.aggressive_btn if aggressive else self.smart_btn
         btn.setEnabled(False)
         old_text = btn.text()
         btn.setText("⏳")
-        app = QApplication.instance()
-        if app is not None:
-            app.processEvents()
 
         profile = self._aggressive_profile if aggressive else self._smart_profile
-        kill_callback = (
-            (
-                lambda candidates: confirm_kill(
-                    self,
-                    candidates,
-                    title=f"Confirm {profile.name} Cleanup",
-                    warning_prefix="background",
-                )
-            )
-            if profile.enable_kill and profile.confirm_before_kill
-            else None
+        self._start_cleanup_worker(
+            profile=profile,
+            scope=None,
+            mode_label=f"{profile.name} Clear",
+            on_done_btn=btn,
+            on_done_btn_text=old_text,
         )
-        try:
-            result = release_resources(profile=profile, confirm_kill=kill_callback)
-            LOGGER.info(
-                "Resource release (%s): %s",
-                profile.name, result.summary,
+
+    def _start_cleanup_worker(
+        self,
+        *,
+        profile,
+        scope,
+        mode_label: str,
+        on_done_btn=None,
+        on_done_btn_text: str = "",
+    ) -> None:
+        """Spin up the worker QThread and wire its signals to UI handlers."""
+        self._cleanup_in_flight = True
+        thread = QThread(self)
+        runner = CleanupRunner(
+            profile=profile,
+            scope=scope,
+            kill_dialog_title=f"Confirm {profile.name} Cleanup",
+        )
+        runner.moveToThread(thread)
+
+        # Bound-method receiver lives on TaskbarMonitor (UI thread), so Qt
+        # auto-selects a queued connection when the worker thread emits.
+        runner.request_kill_dialog.connect(self._on_kill_dialog_request)
+        runner.finished.connect(
+            lambda result: self._on_cleanup_done(
+                result, profile, mode_label, on_done_btn, on_done_btn_text, thread, runner,
             )
-            mode_name = f"{profile.name} Clear"
+        )
+        runner.failed.connect(
+            lambda exc: self._on_cleanup_failed(
+                exc, on_done_btn, on_done_btn_text, thread, runner,
+            )
+        )
+        thread.started.connect(runner.run)
+        # Track so __del__ doesn't yank them mid-flight if the user closes the window.
+        self._cleanup_thread = thread
+        self._cleanup_runner = runner
+        thread.start()
+
+    def _on_kill_dialog_request(self, candidates, response, title: str) -> None:
+        """Runs on the UI thread (queued from worker). Show dialog, return result."""
+        try:
+            approved = confirm_kill(
+                self,
+                candidates,
+                title=title,
+                warning_prefix="background",
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            LOGGER.exception("confirm_kill dialog failed")
+            approved = None
+        provide_kill_response(response, approved)
+
+    def _on_cleanup_done(
+        self, result, profile, mode_label, btn, btn_text, thread, runner,
+    ) -> None:
+        try:
+            LOGGER.info("Resource release (%s): %s", profile.name, result.summary)
             tooltip = f"Last freed: {result.ram_freed_gb:.2f} GB"
             if result.errors:
                 tooltip += f" — {len(result.errors)} error(s)"
                 self._last_release_error_count = len(result.errors)
             else:
                 self._last_release_error_count = 0
-            self._present_cleanup_result(mode_name, result)
-            btn.setToolTip(tooltip)
-        except OSError:
-            LOGGER.exception("OS error during resource release")
-            btn.setToolTip("Release failed — see log")
-        except Exception:  # pylint: disable=broad-exception-caught
-            LOGGER.exception("Resource release failed")
-            btn.setToolTip("Release failed — see log")
+            self._present_cleanup_result(mode_label, result)
+            if btn is not None:
+                btn.setToolTip(tooltip)
         finally:
-            QTimer.singleShot(600, lambda: self._restore_btn(btn, old_text))
+            self._teardown_cleanup_worker(thread, runner)
+            if btn is not None:
+                QTimer.singleShot(600, lambda: self._restore_btn(btn, btn_text))
+
+    def _on_cleanup_failed(self, exc, btn, btn_text, thread, runner) -> None:
+        LOGGER.error("Resource release failed: %s", exc, exc_info=exc)
+        if btn is not None:
+            btn.setToolTip("Release failed — see log")
+        self._teardown_cleanup_worker(thread, runner)
+        if btn is not None:
+            QTimer.singleShot(600, lambda: self._restore_btn(btn, btn_text))
+
+    def _teardown_cleanup_worker(self, thread, runner) -> None:
+        self._cleanup_in_flight = False
+        try:
+            thread.quit()
+            thread.wait(2000)
+        except RuntimeError:
+            pass
+        runner.deleteLater()
+        thread.deleteLater()
+        if getattr(self, "_cleanup_thread", None) is thread:
+            self._cleanup_thread = None
+            self._cleanup_runner = None
 
     def _present_cleanup_result(self, mode_name: str, result) -> None:
         """Show the cleanup toast and open diagnostics when needed."""

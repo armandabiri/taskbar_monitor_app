@@ -250,10 +250,14 @@ def _run_snapshot_cleanup(
     live_targets: list[ProcessCandidate] = []
     seen_candidate_pids: set[int] = set()
 
+    seen = 0
     for proc in psutil.process_iter(
         ["pid", "name", "memory_info", "username", "exe", "create_time"],
         ad_value=None,
     ):
+        seen += 1
+        if seen % 25 == 0:
+            time.sleep(0.001)
         try:
             info = proc.info
             pid = int(info["pid"])
@@ -321,10 +325,16 @@ def _scan_system_reclaim(
     active_pids: set[int] = set()
     keep_list = set(profile.keep_list_entries())
 
+    # Counter for periodic GIL yield so the UI thread can paint while we walk
+    # hundreds of processes here (each iteration is CPU-bound in Python).
+    seen = 0
     for proc in psutil.process_iter(
         ["pid", "name", "memory_info", "create_time", "status", "username", "exe"],
         ad_value=None,
     ):
+        seen += 1
+        if seen % 25 == 0:
+            time.sleep(0.001)
         try:
             info = proc.info
             pid = int(info["pid"])
