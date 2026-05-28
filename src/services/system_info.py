@@ -435,10 +435,32 @@ def get_top_processes(limit: int = 5, sort_by: str = "cpu") -> list[ProcessRow]:
 
 
 def prime_process_cpu() -> None:
-    """Prime per-process CPU counters so subsequent reads are meaningful."""
-    for proc in psutil.process_iter():
+    """Prime per-process CPU counters so the first ``get_top_processes`` call
+    returns meaningful values.
+
+    Matches ``get_top_processes``'s pre-filter (skips small/system processes)
+    so we don't prime hundreds of tiny processes that can never appear in the
+    Top Processes popup. Yields the GIL periodically so the UI thread stays
+    responsive while we run on a background thread.
+    """
+    own_pid = os.getpid()
+    primed = 0
+    for proc in psutil.process_iter(["pid", "memory_info"]):
         try:
+            info = proc.info
+            pid = info["pid"]
+            if pid == own_pid or pid <= 4:
+                continue
+            mem = info.get("memory_info")
+            ram_mb = (mem.rss / (1024 * 1024)) if mem else 0.0
+            if ram_mb < TOP_PROC_MIN_RSS_MB:
+                continue
             proc.cpu_percent(interval=None)
+            primed += 1
+            # Yield the GIL every 20 processes so the UI thread can paint and
+            # process input even if many candidates qualify.
+            if primed % 20 == 0:
+                time.sleep(0.001)
         except (psutil.NoSuchProcess, psutil.AccessDenied):
             continue
 

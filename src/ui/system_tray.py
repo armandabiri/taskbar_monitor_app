@@ -22,6 +22,7 @@ def build_tray(
     on_show_clipboard: Callable[[], None],
     on_show_snapshots: Callable[[], None],
     on_show_cmdline_kill: Callable[[], None],
+    on_show_app_chord_manager: Callable[[], None],
     on_show_cleanup_history: Callable[[], None],
     get_is_recording: Callable[[], bool],
     on_toggle_recording: Callable[[], None],
@@ -79,6 +80,10 @@ def build_tray(
     act_cmdline_kill = QAction("Kill by Command Line (WMI)…", parent)
     act_cmdline_kill.triggered.connect(lambda: on_show_cmdline_kill())
     menu.addAction(act_cmdline_kill)
+
+    act_app_chord = QAction("App Chord Shortcuts…", parent)
+    act_app_chord.triggered.connect(lambda: on_show_app_chord_manager())
+    menu.addAction(act_app_chord)
 
     recording_menu = menu.addMenu("Microphone Recording")
 

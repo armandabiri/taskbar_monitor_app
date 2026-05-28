@@ -46,7 +46,8 @@ from core.config import (
     read_setting_int,
     runtime_log_path,
 )
-from core.theme import THEME_MODES, DEFAULT_THEME_MODE, ThemeEngine
+from core.theme import DEFAULT_THEME_MODE, THEME_MODES, ThemeEngine
+from services.app_chord_service import AppChordService, load_chord_entries
 from services.clipboard_history_service import ClipboardHistoryService
 from services.microphone_recorder import (
     MicrophoneRecorder,
@@ -72,10 +73,10 @@ from services.system_info import (
     get_cpu_temp,
     get_gpu_stats,
     get_ram_temp,
-    prime_process_cpu,
     start_background_pollers,
     stop_background_pollers,
 )
+from ui.app_chord_dialog import open_app_chord_manager
 from ui.battery_widget import BatteryWidget
 from ui.cleanup_history_dialog import open_cleanup_history_dialog
 from ui.cleanup_result_dialog import open_cleanup_result_dialog
@@ -275,6 +276,18 @@ class TaskbarMonitor(QWidget):
                 + ", ".join(failed_hotkeys),
             )
 
+        # App chord shortcuts — per-app chords that forward keystrokes
+        self.app_chord_service = AppChordService(
+            notify=lambda title, msg: NotificationService.notify(title, msg),
+        )
+        failed_chords = self.app_chord_service.reload(load_chord_entries(self.settings))
+        if failed_chords:
+            NotificationService.notify(
+                APP_NAME,
+                f"Could not register {len(failed_chords)} chord prefix(es): "
+                + ", ".join(failed_chords),
+            )
+
         # System tray
         self.tray = build_tray(
             parent=self,
@@ -286,6 +299,7 @@ class TaskbarMonitor(QWidget):
             on_show_clipboard=self.show_clipboard_popup,
             on_show_snapshots=self.show_snapshot_manager,
             on_show_cmdline_kill=self.show_cmdline_kill_dialog,
+            on_show_app_chord_manager=self.show_app_chord_manager,
             on_show_cleanup_history=self.show_cleanup_history,
             get_is_recording=lambda: self.is_microphone_recording(),
             on_toggle_recording=self.toggle_microphone_recording,
@@ -651,6 +665,24 @@ class TaskbarMonitor(QWidget):
     def show_cmdline_kill_dialog(self) -> None:
         """Kill processes whose WMI CommandLine matches a saved regex."""
         open_cmdline_kill_dialog(self.settings, parent=self)
+
+    def show_app_chord_manager(self) -> None:
+        """Open the app chord shortcuts manager and reload the service on apply."""
+        open_app_chord_manager(
+            self.settings,
+            on_apply=self._on_app_chord_entries_changed,
+            parent=self,
+        )
+
+    def _on_app_chord_entries_changed(self, entries) -> None:
+        """Re-register chord hotkeys after the user edits entries."""
+        failed = self.app_chord_service.reload(entries)
+        if failed:
+            NotificationService.notify(
+                APP_NAME,
+                f"Could not register {len(failed)} chord prefix(es): "
+                + ", ".join(failed),
+            )
 
     def show_recording_settings(self) -> None:
         """Open the microphone recording settings dialog."""
@@ -1125,6 +1157,7 @@ class TaskbarMonitor(QWidget):
             except MicrophoneRecorderError:
                 LOGGER.exception("Failed to stop microphone recording during shutdown")
         self.shortcut_service.unregister_all()
+        self.app_chord_service.unregister_all()
         stop_background_pollers()
         if self.tray is not None:
             self.tray.hide()
@@ -1158,10 +1191,11 @@ def main() -> int:
     monitor._apply_win32_topmost()
     monitor._enforce_topmost()
 
-    # Prime per-process CPU baselines lazily so startup isn't blocked iterating
-    # hundreds of processes (this only affects the first sample of the Top
-    # Processes popup, which already shows a "Loading…" placeholder).
-    QTimer.singleShot(0, prime_process_cpu)
+    # No startup CPU prime: iterating every running process holds the GIL for
+    # 10–20s on busy systems, which made the just-shown window unresponsive
+    # (freezing right-clicks and other interactions). The Top Processes popup
+    # has its own QThread that polls every 2.5s, so the first emit shows
+    # 0% CPU briefly and the next emit shows real values.
     # Background LHM/temperature poller — keeps HTTP off the UI thread.
     QTimer.singleShot(0, start_background_pollers)
     return app.exec()

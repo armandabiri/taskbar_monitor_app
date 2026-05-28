@@ -85,6 +85,9 @@ class MonitorProtocol(Protocol):
     def show_cmdline_kill_dialog(self) -> None:
         """Open kill-by-WMI-command-line dialog."""
 
+    def show_app_chord_manager(self) -> None:
+        """Open the app chord shortcuts manager dialog."""
+
     def is_microphone_recording(self) -> bool:
         """Return whether microphone recording is active."""
 
@@ -201,6 +204,11 @@ class AppMenuBuilder:
         if isinstance(parent, MonitorProtocol):
             cmdline_kill_action.triggered.connect(parent.show_cmdline_kill_dialog)
         menu.addAction(cmdline_kill_action)
+
+        chord_action = QAction("App Chord Shortcuts…", parent)
+        if isinstance(parent, MonitorProtocol):
+            chord_action.triggered.connect(parent.show_app_chord_manager)
+        menu.addAction(chord_action)
 
         if isinstance(parent, MonitorProtocol):
             AppMenuBuilder._add_recording_submenu(menu, parent)
