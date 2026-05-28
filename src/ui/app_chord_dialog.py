@@ -6,10 +6,11 @@ import logging
 import os
 from typing import Callable
 
-from PyQt6.QtCore import QSettings, Qt
+from PyQt6.QtCore import QSettings, QSize, Qt
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -56,6 +57,26 @@ QLabel#recordPreview {
     font-family: Consolas, monospace;
     font-size: 18px;
 }
+QLabel#emptyHint {
+    color: #777; font-style: italic; padding: 28px;
+}
+QLabel#entryName { color: #f0f0f0; font-size: 13px; font-weight: 600; }
+QLabel#entryTarget { color: #888; font-size: 11px; }
+QLabel#kbdBadge {
+    color: #cfe; background-color: #2a3a36; border: 1px solid #3a4a46;
+    border-radius: 3px; padding: 2px 8px;
+    font-family: Consolas, monospace; font-size: 11px;
+}
+QLabel#remapBadge {
+    color: #ffeaa7; background-color: #3a3320; border: 1px solid #554a30;
+    border-radius: 9px; padding: 1px 8px; font-size: 10px;
+}
+QListWidget#entryList::item { padding: 0; }
+QListWidget#entryList::item:selected { background-color: #233a36; }
+QPushButton#primaryBtn {
+    background-color: #2a3a36; border-color: #3a5a52; color: #cfe;
+}
+QPushButton#primaryBtn:hover { background-color: #335048; border-color: #55efc4; }
 QLineEdit {
     background-color: #2a2a2a; color: #eee; border: 1px solid #444;
     border-radius: 3px; padding: 4px 8px; min-width: 160px;
@@ -285,6 +306,10 @@ class RecordShortcutDialog(QDialog):
         # child, so the user doesn't have to think about focus.
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
+    def showEvent(self, a0) -> None:  # noqa: N802  pylint: disable=invalid-name
+        super().showEvent(a0)
+        _center_on_screen(self)
+
     def chord(self) -> str:
         return self._captured
 
@@ -364,7 +389,8 @@ class PickWindowDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Pick a window")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumSize(640, 600)
+        self.setMinimumSize(640, 480)
+        self.resize(720, 540)
         self._selected: WindowInfo | None = None
         self._windows: list[WindowInfo] = []
 
@@ -404,6 +430,10 @@ class PickWindowDialog(QDialog):
         layout.addWidget(buttons)
 
         self._reload_windows()
+
+    def showEvent(self, a0) -> None:  # noqa: N802  pylint: disable=invalid-name
+        super().showEvent(a0)
+        _center_on_screen(self)
 
     def picked(self) -> WindowInfo | None:
         return self._selected
@@ -453,7 +483,8 @@ class AppChordEditDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("App Chord Shortcut")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumSize(560, 700)
+        self.setMinimumSize(560, 560)
+        self.resize(600, 640)
         self._existing = entry
         self._result: AppChordEntry | None = None
 
@@ -733,8 +764,64 @@ class AppChordEditDialog(QDialog):
         )
         self.accept()
 
+    def showEvent(self, a0) -> None:  # noqa: N802  pylint: disable=invalid-name
+        super().showEvent(a0)
+        _center_on_screen(self)
+
     def result_entry(self) -> AppChordEntry | None:
         return self._result
+
+
+# ----------------------------------------------------------------------------
+# Per-entry list widget
+# ----------------------------------------------------------------------------
+class ChordEntryItemWidget(QWidget):
+    """Row widget showing an :class:`AppChordEntry` with proper hierarchy.
+
+    Layout::
+
+        ┌─────────────────────────────────────────────────────────┐
+        │  Display Name                       Ctrl+Alt+Shift+T    │
+        │  process-name.exe                          2 remaps     │
+        └─────────────────────────────────────────────────────────┘
+    """
+
+    def __init__(self, entry: AppChordEntry, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 8, 10, 8)
+        outer.setSpacing(3)
+
+        # Top row: name + prefix badge
+        top = QHBoxLayout()
+        top.setSpacing(8)
+        name_label = QLabel(entry.name or "(unnamed)")
+        name_label.setObjectName("entryName")
+        top.addWidget(name_label, 1)
+        if entry.prefix_chord:
+            prefix_label = QLabel(_pretty_chord(entry.prefix_chord))
+            prefix_label.setObjectName("kbdBadge")
+            prefix_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            top.addWidget(prefix_label)
+        outer.addLayout(top)
+
+        # Bottom row: process/exe + mapping count
+        bottom = QHBoxLayout()
+        bottom.setSpacing(8)
+        target = entry.process_name or os.path.basename(entry.exe_path) or "(no target)"
+        target_label = QLabel(target)
+        target_label.setObjectName("entryTarget")
+        bottom.addWidget(target_label, 1)
+
+        valid_mappings = entry.valid_mappings()
+        if valid_mappings:
+            count_label = QLabel(
+                f"{len(valid_mappings)} remap" + ("s" if len(valid_mappings) > 1 else "")
+            )
+            count_label.setObjectName("remapBadge")
+            count_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            bottom.addWidget(count_label)
+        outer.addLayout(bottom)
 
 
 # ----------------------------------------------------------------------------
@@ -752,7 +839,8 @@ class AppChordManagerDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("App Chord Shortcuts")
         self.setStyleSheet(_DIALOG_STYLE)
-        self.setMinimumSize(640, 560)
+        self.setMinimumSize(620, 420)
+        self.resize(680, 460)
         self._settings = settings
         self._on_apply = on_apply
         self._entries: list[AppChordEntry] = load_chord_entries(settings)
@@ -762,9 +850,9 @@ class AppChordManagerDialog(QDialog):
         layout.setSpacing(10)
 
         hint = QLabel(
-            "Each entry focuses a target app from any window via its prefix "
-            "chord, or remaps any global shortcut to the app's own shortcut. "
-            "Focus is restored when you're done."
+            "Each entry focuses a target app via its prefix chord, or remaps "
+            "any global shortcut to the app's own shortcut. Focus returns when "
+            "you're done."
         )
         hint.setObjectName("hint")
         hint.setWordWrap(True)
@@ -772,13 +860,22 @@ class AppChordManagerDialog(QDialog):
 
         self._list = QListWidget()
         self._list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self._list.setObjectName("entryList")
         self._list.itemDoubleClicked.connect(lambda _i: self._edit_selected())
+        # Empty placeholder shown when there are no entries yet.
+        self._empty_label = QLabel("No app chord shortcuts yet. Click + Add to create one.")
+        self._empty_label.setObjectName("emptyHint")
+        self._empty_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._empty_label.setWordWrap(True)
         layout.addWidget(self._list, 1)
+        layout.addWidget(self._empty_label)
 
+        # Action buttons row: Add / Edit / Delete on the left, Close on the right.
         action_row = QHBoxLayout()
-        add_btn = QPushButton("Add…")
+        add_btn = QPushButton("+ Add")
+        add_btn.setObjectName("primaryBtn")
         add_btn.clicked.connect(self._add_new)
-        edit_btn = QPushButton("Edit…")
+        edit_btn = QPushButton("Edit")
         edit_btn.clicked.connect(self._edit_selected)
         delete_btn = QPushButton("Delete")
         delete_btn.clicked.connect(self._delete_selected)
@@ -786,19 +883,27 @@ class AppChordManagerDialog(QDialog):
         action_row.addWidget(edit_btn)
         action_row.addWidget(delete_btn)
         action_row.addStretch(1)
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        action_row.addWidget(close_btn)
         layout.addLayout(action_row)
 
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
-        button_box.rejected.connect(self.accept)
-        layout.addWidget(button_box)
-
         self._refresh_list()
+
+    def showEvent(self, a0) -> None:  # noqa: N802  pylint: disable=invalid-name
+        super().showEvent(a0)
+        _center_on_screen(self)
 
     def _refresh_list(self) -> None:
         self._list.clear()
         for entry in self._entries:
-            item = QListWidgetItem(_format_entry_label(entry))
+            item = QListWidgetItem()
+            item.setSizeHint(QSize(0, 60))
             self._list.addItem(item)
+            self._list.setItemWidget(item, ChordEntryItemWidget(entry, self._list))
+        has_entries = bool(self._entries)
+        self._list.setVisible(has_entries)
+        self._empty_label.setVisible(not has_entries)
 
     def _selected_index(self) -> int:
         row = self._list.currentRow()
@@ -909,19 +1014,26 @@ def open_app_chord_manager(
     dialog.exec()
 
 
-def _format_entry_label(entry: AppChordEntry) -> str:
-    target = entry.process_name or os.path.basename(entry.exe_path) or "(no target)"
-    prefix_part = _pretty_chord(entry.prefix_chord) if entry.prefix_chord else "(no prefix)"
-    valid_mappings = entry.valid_mappings()
-    extra = ""
-    if valid_mappings:
-        extra = f"    +{len(valid_mappings)} remap"
-        if len(valid_mappings) > 1:
-            extra += "s"
-    return (
-        f"{entry.name}    [{target}]\n"
-        f"    {prefix_part}{extra}"
-    )
+def _center_on_screen(dialog: QDialog) -> None:
+    """Center the dialog on whichever screen its parent (or cursor) sits on,
+    constrained to the screen's available geometry so no edges get clipped.
+    """
+    screen = None
+    if dialog.parent() is not None and hasattr(dialog.parent(), "screen"):
+        screen = dialog.parent().screen()  # type: ignore[attr-defined]
+    if screen is None:
+        app = QApplication.instance()
+        if isinstance(app, QApplication):
+            screen = app.primaryScreen()
+    if screen is None:
+        return
+    avail = screen.availableGeometry()
+    size = dialog.size()
+    width = min(size.width(), avail.width())
+    height = min(size.height(), avail.height())
+    x_pos = avail.x() + max(0, (avail.width() - width) // 2)
+    y_pos = avail.y() + max(0, (avail.height() - height) // 2)
+    dialog.move(x_pos, y_pos)
 
 
 def _format_mapping_label(mapping: ShortcutMapping) -> str:
