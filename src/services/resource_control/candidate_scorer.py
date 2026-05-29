@@ -88,7 +88,16 @@ class CandidateScorer:
         disk_gb_s = self._effective_disk_gb_s(telemetry, age_seconds)
         other_gb_s = self._effective_other_gb_s(telemetry, age_seconds)
         max_activity = max(cpu_percent, disk_gb_s, other_gb_s)
-        uss_gb = self._get_uss_gb(proc)
+        # USS via memory_full_info is the most expensive psutil call on Windows
+        # (opens the process and walks its working-set list). Only spend it on
+        # candidates that have a realistic shot of being acted on — big enough,
+        # showing real activity, or in a kill-enabled profile owned by us.
+        needs_uss = (
+            rss_gb >= plan.trim_threshold_gb
+            or max_activity > 0.0
+            or (profile.enable_kill and same_user)
+        )
+        uss_gb = self._get_uss_gb(proc) if needs_uss else None
         estimated = self._estimate_reclaimable_gb(rss_gb, uss_gb, plan.trim_threshold_gb)
         tags = self._hot_tags(proc, cpu_percent, disk_gb_s, other_gb_s, plan, is_foreground)
         kill_eligible = bool(

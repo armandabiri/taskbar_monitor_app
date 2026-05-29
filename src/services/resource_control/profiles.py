@@ -158,7 +158,10 @@ NUCLEAR = ResourceProfile(
     trim_cooldown_seconds=30.0,
     min_reclaim_mb=512.0,
     max_reclaim_mb=8192.0,
-    flush_standby=FLUSH_ALWAYS,
+    # Critical-only standby flush instead of FLUSH_ALWAYS — FLUSH_ALWAYS drops
+    # the entire Windows file cache and makes the whole system sluggish for
+    # the next minute as files re-cache from disk.
+    flush_standby=FLUSH_CRITICAL_ONLY,
     enable_throttle=True,
     max_throttle_per_run=5,
     throttle_cooldown_seconds=45.0,
@@ -169,8 +172,13 @@ NUCLEAR = ResourceProfile(
     spare_visible_windows=False,
     spare_tray_icons=False,
     confirm_before_kill=True,
-    empty_all_working_sets=True,
-    flush_modified_pages=True,
+    # The two system-wide ops below are kernel-level operations that pause
+    # the entire OS while they run (empty_all_working_sets unmaps every
+    # process's RAM; flush_modified_pages forces a synchronous disk flush).
+    # They make the user's system feel frozen for several seconds. Off by
+    # default — power users can enable them via a custom profile if needed.
+    empty_all_working_sets=False,
+    flush_modified_pages=False,
 )
 
 BUILTIN_PRESETS: tuple[ResourceProfile, ...] = (GENTLE, BALANCED, AGGRESSIVE, NUCLEAR)

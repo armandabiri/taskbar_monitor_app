@@ -325,6 +325,12 @@ def _scan_system_reclaim(
     active_pids: set[int] = set()
     keep_list = set(profile.keep_list_entries())
 
+    # Minimum RSS a process must have before we even score it. Anything
+    # smaller can never meaningfully contribute to reclaim, so dropping it
+    # before the scorer's USS lookup (which is an extra per-process syscall
+    # via memory_full_info on Windows) is a big speedup on busy systems.
+    scan_floor_bytes = max(int(profile.trim_threshold_mb * 1024 * 1024) // 2, 16 * 1024 * 1024)
+
     # Counter for periodic GIL yield so the UI thread can paint while we walk
     # hundreds of processes here (each iteration is CPU-bound in Python).
     seen = 0
@@ -344,6 +350,20 @@ def _scan_system_reclaim(
                 result.processes_skipped += 1
                 continue
             active_pids.add(pid)
+            # Cheapest possible early-out: skip processes whose RSS is far below
+            # the trim threshold. Saves the per-process memory_full_info (USS)
+            # syscall the scorer would otherwise make. Kill-eligible profiles
+            # still get a fair look at small processes via the scorer.
+            memory_info = info.get("memory_info")
+            rss_bytes = float(getattr(memory_info, "rss", 0)) if memory_info is not None else 0.0
+            if (
+                not profile.enable_kill
+                and not snapshot_spare_keys
+                and rss_bytes < scan_floor_bytes
+            ):
+                result.record_skip(SkipReason.BELOW_TRIM_THRESHOLD)
+                result.processes_skipped += 1
+                continue
             if snapshot_spare_keys:
                 key = (name, (info.get("exe") or "").lower())
                 if key in snapshot_spare_keys:
@@ -492,6 +512,10 @@ def _execute_trim_phase(candidates: list[ProcessCandidate], plan, now_mono: floa
         if _do_trim(candidate, now_mono, result):
             success_count += 1
             estimated_success_gb += candidate.estimated_reclaim_gb
+            # Pause briefly between trims so the kernel can write evicted
+            # pages back to disk in a steady trickle instead of one storm —
+            # otherwise the system feels frozen while disk IO catches up.
+            time.sleep(0.03)
 
 
 def _do_trim(candidate: ProcessCandidate, now_mono: float, result: ReleaseResult) -> bool:
