@@ -170,26 +170,71 @@ class ScrollSelector(_ScreenOverlay):
     def __init__(
         self,
         screen: QScreen,
-        on_selected: Callable[[QPoint], None],
+        on_selected: Callable[[QPoint, QRect | None, QScreen], None],
         on_cancelled: Callable[[], None],
     ) -> None:
         super().__init__(screen, on_cancelled)
         self.on_selected = on_selected
         self.setCursor(Qt.CursorShape.SizeVerCursor)
+        self.start_pos: QPoint | None = None
+        self.end_pos: QPoint | None = None
+        self.is_selecting = False
 
     def paintEvent(self, event) -> None:
         del event
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 70))
 
+        if self.start_pos is None or self.end_pos is None:
+            return
+
+        rect = QRect(self.start_pos, self.end_pos).normalized().intersected(self.rect())
+        if rect.width() <= 5 or rect.height() <= 5:
+            return
+
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_Clear)
+        painter.fillRect(rect, QColor(0, 0, 0, 0))
+        painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceOver)
+        painter.setPen(QPen(QColor("#4db8ff"), 2, Qt.PenStyle.SolidLine))
+        painter.drawRect(rect.adjusted(0, 0, -1, -1))
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
-            pos = event.globalPosition().toPoint()
-            self.hide()
-            self.on_selected(pos)
-            self.close()
+            self.start_pos = event.position().toPoint()
+            self.end_pos = self.start_pos
+            self.is_selecting = True
+            self.update()
         elif event.button() == Qt.MouseButton.RightButton:
             self.on_cancelled()
             self.close()
         else:
             super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self.is_selecting and self.start_pos is not None:
+            self.end_pos = event.position().toPoint()
+            self.update()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if event.button() != Qt.MouseButton.LeftButton or not self.is_selecting:
+            super().mouseReleaseEvent(event)
+            return
+
+        self.end_pos = event.position().toPoint()
+        self.is_selecting = False
+        self.hide()
+
+        if self.start_pos is None or self.end_pos is None:
+            self.on_cancelled()
+            self.close()
+            return
+
+        rect = QRect(self.start_pos, self.end_pos).normalized().intersected(self.rect())
+        if rect.width() > 20 and rect.height() > 20:
+            global_pos = self.mapToGlobal(rect.center())
+            self.on_selected(global_pos, QRect(rect), self.target_screen)
+        else:
+            self.on_selected(event.globalPosition().toPoint(), None, self.target_screen)
+        self.close()

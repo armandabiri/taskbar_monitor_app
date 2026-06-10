@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from services.native_hotkey_service import parse_hotkey
 from services.shortcut_service import ShortcutService
 
 
@@ -34,7 +35,7 @@ def test_global_shortcuts_suppress_trigger_keystrokes() -> None:
         calls.append(kwargs)
         return object()
 
-    service = ShortcutService()
+    service = ShortcutService(prefer_native=False)
     with patch("services.shortcut_service.keyboard.add_hotkey", side_effect=add_hotkey), patch(
         "services.shortcut_service.keyboard.remove_hotkey"
     ) as remove_hotkey:
@@ -46,3 +47,10 @@ def test_global_shortcuts_suppress_trigger_keystrokes() -> None:
         service.unregister_all()
 
     assert remove_hotkey.call_count == len(calls)
+
+
+def test_native_hotkey_parser_supports_app_shortcuts() -> None:
+    assert parse_hotkey("ctrl+shift+alt+c") is not None
+    assert parse_hotkey("windows+shift+r") is not None
+    assert parse_hotkey("ctrl+shift+alt+delete") is not None
+    assert parse_hotkey("ctrl+shift+alt+=") is not None

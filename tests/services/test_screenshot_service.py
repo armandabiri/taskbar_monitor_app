@@ -60,3 +60,5 @@ def test_stitch_images() -> None:
     # Height should be 100 + 60 = 160
     assert stitched.height() == 160
     assert stitched.width() == 100
+    assert stitched.pixelColor(50, 80) == QColor("white")
+    assert stitched.pixelColor(50, 120) == QColor("black")

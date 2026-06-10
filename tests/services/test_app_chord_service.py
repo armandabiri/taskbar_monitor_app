@@ -156,7 +156,7 @@ class TestPersistence:
 
 class TestAppChordServiceReload:
     def test_invalid_entries_are_filtered_out(self) -> None:
-        service = AppChordService()
+        service = AppChordService(prefer_native=False)
         add_path = "services.app_chord_service.keyboard.add_hotkey"
         rm_path = "services.app_chord_service.keyboard.remove_hotkey"
         with patch(add_path, return_value="handle"), patch(rm_path):
@@ -168,7 +168,7 @@ class TestAppChordServiceReload:
         assert [e.name for e in service.entries] == ["ok"]
 
     def test_duplicate_prefixes_register_once(self) -> None:
-        service = AppChordService()
+        service = AppChordService(prefer_native=False)
         add_path = "services.app_chord_service.keyboard.add_hotkey"
         rm_path = "services.app_chord_service.keyboard.remove_hotkey"
         with patch(add_path, return_value="handle") as add, patch(rm_path):
@@ -180,7 +180,7 @@ class TestAppChordServiceReload:
         assert add.call_count == 1
 
     def test_mapping_triggers_are_registered(self) -> None:
-        service = AppChordService()
+        service = AppChordService(prefer_native=False)
         add_path = "services.app_chord_service.keyboard.add_hotkey"
         rm_path = "services.app_chord_service.keyboard.remove_hotkey"
         with patch(add_path, return_value="handle") as add, patch(rm_path):
@@ -197,7 +197,7 @@ class TestAppChordServiceReload:
         assert add.call_count == 3
 
     def test_entry_with_only_mappings_registers(self) -> None:
-        service = AppChordService()
+        service = AppChordService(prefer_native=False)
         add_path = "services.app_chord_service.keyboard.add_hotkey"
         rm_path = "services.app_chord_service.keyboard.remove_hotkey"
         with patch(add_path, return_value="handle") as add, patch(rm_path):
@@ -210,7 +210,7 @@ class TestAppChordServiceReload:
         assert add.call_count == 1
 
     def test_failed_registration_is_reported(self) -> None:
-        service = AppChordService()
+        service = AppChordService(prefer_native=False)
         with patch(
             "services.app_chord_service.keyboard.add_hotkey",
             side_effect=ValueError("nope"),

@@ -5,20 +5,31 @@ from typing import Any, Callable
 
 import keyboard
 
+from services.native_hotkey_service import NativeHotkeyRegistrar
+
 LOGGER = logging.getLogger(__name__)
 
 
 class ShortcutService:
     """Manages global hotkeys for the application."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, prefer_native: bool | None = None) -> None:
         """Initialize shortcuts state."""
         self.failed: list[str] = []
         self.registered: list[str] = []
         self._handles: list[Any] = []
+        self._native_hotkeys = NativeHotkeyRegistrar(enabled=prefer_native)
 
     def _try_register(self, hotkey: str, callback: Callable[[], Any]) -> None:
         """Register one hotkey, track success/failure individually."""
+        native_result = self._native_hotkeys.register(hotkey, callback)
+        if native_result is True:
+            self.registered.append(hotkey)
+            return
+        if native_result is False:
+            self.failed.append(hotkey)
+            return
+
         try:
             handle = keyboard.add_hotkey(
                 hotkey,
@@ -103,6 +114,7 @@ class ShortcutService:
 
     def unregister_all(self) -> None:
         """Clear all registered hotkeys."""
+        self._native_hotkeys.unregister_all()
         for handle in list(self._handles):
             try:
                 keyboard.remove_hotkey(handle)

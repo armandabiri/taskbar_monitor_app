@@ -32,6 +32,8 @@ import keyboard
 import psutil
 from PyQt6.QtCore import QSettings
 
+from services.native_hotkey_service import NativeHotkeyRegistrar
+
 LOGGER = logging.getLogger(__name__)
 
 SETTINGS_KEY = "app_chord_entries"
@@ -392,11 +394,17 @@ def _focus_or_launch(entry: AppChordEntry, *, launch_timeout: float = 4.0) -> bo
 class AppChordService:
     """Registers focus-prefix and remap-trigger hotkeys for each app entry."""
 
-    def __init__(self, notify: Callable[[str, str], Any] | None = None) -> None:
+    def __init__(
+        self,
+        notify: Callable[[str, str], Any] | None = None,
+        *,
+        prefer_native: bool | None = None,
+    ) -> None:
         self._entries: list[AppChordEntry] = []
         # All registered trigger hotkeys (prefix and mapping triggers alike).
         # Key is the normalized chord string; value is the keyboard-lib handle.
         self._hotkey_handles: dict[str, Any] = {}
+        self._native_hotkeys = NativeHotkeyRegistrar(enabled=prefer_native)
         self._dispatch_lock = threading.Lock()
         self._dispatch_busy = False
         self._notify = notify
@@ -437,7 +445,10 @@ class AppChordService:
 
     def unregister_all(self) -> None:
         """Remove every registered hotkey."""
+        self._native_hotkeys.unregister_all()
         for chord, handle in list(self._hotkey_handles.items()):
+            if handle is None:
+                continue
             try:
                 keyboard.remove_hotkey(handle)
             except (KeyError, ValueError):
@@ -456,6 +467,14 @@ class AppChordService:
     # Registration helpers
     # ------------------------------------------------------------------
     def _register_hotkey(self, chord: str, callback: Callable[[], None]) -> None:
+        native_result = self._native_hotkeys.register(chord, callback)
+        if native_result is True:
+            self._hotkey_handles[chord] = None
+            return
+        if native_result is False:
+            self.failed.append(chord)
+            return
+
         try:
             handle = keyboard.add_hotkey(
                 chord, callback, suppress=True, trigger_on_release=False,

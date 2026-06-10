@@ -395,7 +395,7 @@ class TaskbarMonitor(QWidget):
         except OSError:
             pass
 
-    def nativeEvent(self, event_type, message):  # pylint: disable=invalid-name
+    def nativeEvent(self, event_type, message):  # noqa: N802  # pylint: disable=invalid-name
         """Intercept WM_WINDOWPOSCHANGING to pin ourselves at HWND_TOPMOST.
 
         Windows sends WM_WINDOWPOSCHANGING before every Z-order change. By
@@ -414,7 +414,7 @@ class TaskbarMonitor(QWidget):
             pass
         return False, 0
 
-    def showEvent(self, a0) -> None:  # pylint: disable=invalid-name
+    def showEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Re-apply topmost every time the window becomes visible."""
         super().showEvent(a0)
         # Synchronous re-apply (mirrors the originally-working pattern).
@@ -758,7 +758,10 @@ class TaskbarMonitor(QWidget):
         """Reload microphone recording settings from QSettings."""
         self._recording_settings = load_recording_settings(self.settings)
         self._microphone_recorder.update_settings(self._recording_settings)
-        self._set_microphone_button_state(self._microphone_recorder.is_recording, self._microphone_recorder.active_session)
+        self._set_microphone_button_state(
+            self._microphone_recorder.is_recording,
+            self._microphone_recorder.active_session,
+        )
 
     def open_recordings_folder(self) -> None:
         """Open the configured recordings directory in the OS shell."""
@@ -1225,8 +1228,14 @@ class TaskbarMonitor(QWidget):
             self._restore_after_screenshot()
             return
 
-        def on_selected(global_pos: QPoint) -> None:
+        def on_selected(
+            global_pos: QPoint,
+            viewport_rect: QRect | None,
+            viewport_screen,
+        ) -> None:
             clicked_pos = QPoint(global_pos)
+            selected_viewport_rect = QRect(viewport_rect) if viewport_rect is not None else QRect()
+            selected_viewport_screen = viewport_screen
             selector_hwnds: set[int] = set()
             for selector in self.selectors:
                 try:
@@ -1255,6 +1264,8 @@ class TaskbarMonitor(QWidget):
                     self.scrolling_coordinator.start(
                         selection.capture_hwnd,
                         selection.scroll_hwnd,
+                        selected_viewport_screen,
+                        selected_viewport_rect,
                     )
                     return
 
@@ -1439,7 +1450,7 @@ class TaskbarMonitor(QWidget):
     # ------------------------------------------------------------------
     # Painting & events
     # ------------------------------------------------------------------
-    def paintEvent(self, a0: QPaintEvent | None) -> None:  # pylint: disable=invalid-name
+    def paintEvent(self, a0: QPaintEvent | None) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Paint the translucent monitor background."""
         painter = QPainter(self)
         ThemeEngine.paint_background(painter, self.rect(), self.bg_opacity)
@@ -1462,7 +1473,7 @@ class TaskbarMonitor(QWidget):
 
         return edge or None
 
-    def mousePressEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+    def mousePressEvent(self, a0: QMouseEvent | None) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle mouse press for dragging/resizing."""
         if a0 is None or a0.button() != Qt.MouseButton.LeftButton:
             return
@@ -1475,7 +1486,7 @@ class TaskbarMonitor(QWidget):
         self.setCursor(Qt.CursorShape.SizeAllCursor)
         self.m_drag_pos = a0.globalPosition().toPoint() - self.pos()
 
-    def mouseMoveEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+    def mouseMoveEvent(self, a0: QMouseEvent | None) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle mouse move for dragging/resizing."""
         if a0 is None:
             return
@@ -1513,7 +1524,7 @@ class TaskbarMonitor(QWidget):
         else:
             self.setCursor(Qt.CursorShape.SizeBDiagCursor)
 
-    def mouseReleaseEvent(self, a0: QMouseEvent | None) -> None:  # pylint: disable=invalid-name
+    def mouseReleaseEvent(self, a0: QMouseEvent | None) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle mouse release."""
         del a0
         self.m_drag = False
@@ -1521,19 +1532,19 @@ class TaskbarMonitor(QWidget):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.save_geometry()
 
-    def contextMenuEvent(self, a0: QContextMenuEvent | None) -> None:  # pylint: disable=invalid-name
+    def contextMenuEvent(self, a0: QContextMenuEvent | None) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Handle context menu event."""
         if a0 is not None:
             self.menu_handler.handle_event(a0)
 
-    def changeEvent(self, a0) -> None:  # pylint: disable=invalid-name
+    def changeEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Minimize into tray when the user minimizes the window."""
         if a0 is not None and a0.type() == QEvent.Type.WindowStateChange:
             if self.minimize_to_tray and self.isMinimized():
                 QTimer.singleShot(0, self.hide)
         super().changeEvent(a0)
 
-    def closeEvent(self, a0) -> None:  # pylint: disable=invalid-name
+    def closeEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
         """Cleanup shortcuts on close."""
         if self._microphone_recorder.is_recording:
             try:
@@ -1560,7 +1571,10 @@ def main() -> int:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-        handlers=[logging.StreamHandler(), logging.FileHandler(runtime_log_path(), encoding="utf-8")],
+        handlers=[
+            logging.StreamHandler(),
+            logging.FileHandler(runtime_log_path(), encoding="utf-8"),
+        ],
     )
     # Set Per-Monitor DPI awareness before creating QApplication
     try:
