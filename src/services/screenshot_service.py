@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import logging
+import os
 from ctypes import wintypes
 from dataclasses import dataclass
 
@@ -17,12 +19,8 @@ _CAPTUREBLT = 0x40000000
 _SRCCOPY = 0x00CC0020
 _DIB_RGB_COLORS = 0
 _BI_RGB = 0
-_VK_NEXT = 0x22
-_KEYEVENTF_KEYUP = 0x0002
 _GA_ROOT = 2
 _SW_RESTORE = 9
-_WM_KEYDOWN = 0x0100
-_WM_KEYUP = 0x0101
 _WM_MOUSEWHEEL = 0x020A
 _MOUSEEVENTF_WHEEL = 0x0800
 _MOUSEEVENTF_LEFTDOWN = 0x0002
@@ -834,47 +832,6 @@ def grab_window_pixmap(hwnd: int) -> QPixmap:
     return screen.grabWindow(hwnd)
 
 
-def _post_page_down(hwnd: int) -> bool:
-    user32 = _get_user32()
-    if user32 is None or not hwnd:
-        return False
-    try:
-        user32.PostMessageW.argtypes = [
-            wintypes.HWND,
-            wintypes.UINT,
-            wintypes.WPARAM,
-            wintypes.LPARAM,
-        ]
-        user32.PostMessageW.restype = wintypes.BOOL
-        down_ok = bool(user32.PostMessageW(hwnd, _WM_KEYDOWN, _VK_NEXT, 0))
-        up_ok = bool(user32.PostMessageW(hwnd, _WM_KEYUP, _VK_NEXT, 0))
-        return down_ok and up_ok
-    except OSError as exc:
-        LOGGER.debug("PostMessage PageDown failed for hwnd=%s: %s", hwnd, exc)
-        return False
-
-
-def _send_page_down(hwnd: int = 0) -> bool:
-    user32 = _get_user32()
-    if user32 is None:
-        return False
-    if hwnd:
-        _focus_child_window(hwnd)
-    try:
-        user32.keybd_event.argtypes = [
-            wintypes.BYTE,
-            wintypes.BYTE,
-            wintypes.DWORD,
-            _ULONG_PTR,
-        ]
-        user32.keybd_event(_VK_NEXT, 0, 0, 0)
-        user32.keybd_event(_VK_NEXT, 0, _KEYEVENTF_KEYUP, 0)
-        return True
-    except OSError as exc:
-        LOGGER.warning("Failed to send PageDown keypress: %s", exc)
-        return _post_page_down(hwnd)
-
-
 def _send_input_mouse(user32, inputs: list[_INPUT]) -> bool:
     user32.SendInput.argtypes = [
         wintypes.UINT,
@@ -907,7 +864,14 @@ def _pack_signed_words(low: int, high: int) -> int:
     return (low & 0xFFFF) | ((high & 0xFFFF) << 16)
 
 
-def _post_wheel_scroll(hwnd: int, x: int, y: int, *, notches: int = 2) -> bool:
+def _post_wheel_scroll(
+    hwnd: int,
+    x: int,
+    y: int,
+    *,
+    notches: int = 2,
+    upward: bool = False,
+) -> bool:
     """Post wheel messages directly to the selected child/control HWND."""
     user32 = _get_user32()
     if user32 is None or not hwnd:
@@ -920,7 +884,8 @@ def _post_wheel_scroll(hwnd: int, x: int, y: int, *, notches: int = 2) -> bool:
             wintypes.LPARAM,
         ]
         user32.PostMessageW.restype = wintypes.BOOL
-        wparam = wintypes.WPARAM((_pack_signed_words(0, -_WHEEL_DELTA)))
+        delta = _WHEEL_DELTA if upward else -_WHEEL_DELTA
+        wparam = wintypes.WPARAM((_pack_signed_words(0, delta)))
         lparam = wintypes.LPARAM(_pack_signed_words(x, y))
         ok = False
         for _ in range(max(1, notches)):
@@ -931,17 +896,18 @@ def _post_wheel_scroll(hwnd: int, x: int, y: int, *, notches: int = 2) -> bool:
         return False
 
 
-def _send_wheel_scroll_at(x: int, y: int, *, notches: int = 2) -> bool:
-    """Scroll down at a native screen point using mouse-wheel input."""
+def _send_wheel_scroll_at(x: int, y: int, *, notches: int = 2, upward: bool = False) -> bool:
+    """Scroll at a native screen point using mouse-wheel input."""
     user32 = _get_user32()
     if user32 is None:
         return False
+    delta = _WHEEL_DELTA if upward else -_WHEEL_DELTA
     try:
         user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
         user32.SetCursorPos.restype = wintypes.BOOL
         user32.SetCursorPos(x, y)
         inputs = [
-            _mouse_input(_MOUSEEVENTF_WHEEL, -_WHEEL_DELTA)
+            _mouse_input(_MOUSEEVENTF_WHEEL, delta)
             for _ in range(max(1, notches))
         ]
         if _send_input_mouse(user32, inputs):
@@ -958,7 +924,7 @@ def _send_wheel_scroll_at(x: int, y: int, *, notches: int = 2) -> bool:
         ]
         user32.SetCursorPos(x, y)
         for _ in range(max(1, notches)):
-            user32.mouse_event(_MOUSEEVENTF_WHEEL, 0, 0, -_WHEEL_DELTA, 0)
+            user32.mouse_event(_MOUSEEVENTF_WHEEL, 0, 0, delta, 0)
         return True
     except OSError as exc:
         LOGGER.warning("Fallback mouse wheel scroll failed: %s", exc)
@@ -966,7 +932,12 @@ def _send_wheel_scroll_at(x: int, y: int, *, notches: int = 2) -> bool:
 
 
 def _click_native_point(x: int, y: int) -> bool:
-    """Move the cursor to a native screen point and left-click once."""
+    """Move the cursor to a native screen point and left-click once.
+
+    Chromium/Electron windows (VS Code, browsers, most modern editors) ignore a
+    synthetic mouse wheel until the pane has been activated by a real click, so
+    this is what makes wheel scrolling actually take effect on those targets.
+    """
     user32 = _get_user32()
     if user32 is None:
         return False
@@ -1041,6 +1012,33 @@ def _row_signatures(image: QImage, columns: list[int]) -> list[tuple[int, ...]]:
     return signatures
 
 
+def _offset_fallback(height: int, expected_offset: int | None) -> int:
+    """Best-guess scroll offset when content matching is not conclusive."""
+    if expected_offset is not None:
+        return min(max(1, expected_offset), max(1, height - 1))
+    return max(1, int(height * 0.8))
+
+
+def _stride_notches(
+    frame_height: int,
+    px_per_notch: float | None,
+    margin_px: int,
+    fallback_notches: int,
+) -> int:
+    """Wheel notches needed to advance nearly one viewport per scroll step.
+
+    Until pixels-per-notch has been calibrated from a measured frame shift,
+    a small fixed step is used so the first stitch can act as calibration.
+    """
+    if px_per_notch is None or px_per_notch <= 0 or frame_height <= 0:
+        return fallback_notches
+    margin = max(margin_px, int(frame_height * 0.08))
+    target = frame_height - margin
+    if target <= 0:
+        return fallback_notches
+    return max(1, min(200, int(target / px_per_notch)))
+
+
 def find_vertical_offset(
     img1: QImage,
     img2: QImage,
@@ -1052,7 +1050,7 @@ def find_vertical_offset(
     if img1.size() != img2.size():
         return None
     if height <= 50 or width <= 50:
-        return max(1, int(height * 0.8))
+        return _offset_fallback(height, expected_offset)
 
     column_count = min(33, max(9, width // 45))
     columns = [
@@ -1062,13 +1060,14 @@ def find_vertical_offset(
     sigs1 = _row_signatures(img1, columns)
     sigs2 = _row_signatures(img2, columns)
 
-    min_dy = max(10, int(height * 0.08))
+    # Search from dy=1: the final scroll before the bottom can be clamped to
+    # a few pixels, so small offsets must stay in range.
+    min_dy = 1
     max_dy = min(height - 1, int(height * 0.96))
     if max_dy <= min_dy:
-        return max(1, int(height * 0.8))
+        return _offset_fallback(height, expected_offset)
 
     sample_step = max(2, height // 180)
-    coarse_step = max(1, height // 220)
 
     def score(dy: int) -> float:
         overlap = height - dy
@@ -1083,31 +1082,37 @@ def find_vertical_offset(
             comparisons += len(a)
         return diff / max(1, comparisons)
 
-    best_dy = min(range(min_dy, max_dy + 1, coarse_step), key=score)
-    refine_start = max(min_dy, best_dy - coarse_step)
-    refine_end = min(max_dy, best_dy + coarse_step)
-    refined = min(range(refine_start, refine_end + 1), key=score)
-    best_score = score(refined)
+    # Score every candidate shift. The true alignment can be a 1px-sharp
+    # minimum that a coarse grid straddles and misses, so it is scanned at
+    # full resolution.
+    scores = [score(dy) for dy in range(min_dy, max_dy + 1)]
+    best_score = min(scores)
 
-    if expected_offset is not None and min_dy <= expected_offset <= max_dy:
-        tolerance = max(8, int(expected_offset * 0.35))
-        expected_start = max(min_dy, expected_offset - tolerance)
-        expected_end = min(max_dy, expected_offset + tolerance)
-        expected_dy = min(range(expected_start, expected_end + 1), key=score)
-        expected_score = score(expected_dy)
-        if expected_score <= best_score + 3.0 or expected_score <= best_score * 1.5:
-            refined = expected_dy
-            best_score = expected_score
+    # Prefer the SMALLEST shift that aligns essentially as well as the best.
+    # The average-diff metric structurally favors large dy — a tiny overlap has
+    # few rows left to disagree on, so spurious near-bottom matches score low
+    # and over-estimate the offset, duplicating rows at the first and last
+    # seams. The real shift is the smallest near-perfect alignment.
+    tolerance = max(2.0, best_score * 0.4)
+    refined = min_dy
+    chosen_score = best_score
+    for index, value in enumerate(scores):
+        if value <= best_score + tolerance:
+            refined = min_dy + index
+            chosen_score = value
+            break
 
-    if best_score < 18.0:
+    if chosen_score < 18.0:
         return refined
 
+    fallback = _offset_fallback(height, expected_offset)
     LOGGER.warning(
-        "Stitching: best match had high difference: %.2f (dy=%s). Using default.",
-        best_score,
+        "Stitching: best match had high difference: %.2f (dy=%s). Using fallback %d.",
+        chosen_score,
         refined,
+        fallback,
     )
-    return max(1, int(height * 0.8))
+    return fallback
 
 
 def stitch_images(images: list[QImage], offsets: list[int]) -> QImage | None:
@@ -1143,18 +1148,35 @@ def stitch_images(images: list[QImage], offsets: list[int]) -> QImage | None:
 
 
 class ScrollingScreenshotCoordinator(QObject):
-    """Orchestrates scrolling screenshots step-by-step using a QTimer."""
+    """Orchestrates scrolling screenshots step-by-step using a QTimer.
+
+    The capture runs in two phases: the scroll target is first driven back to
+    its top with upward wheel bursts (probing for a scroll method that
+    actually moves the content), then frames are captured while scrolling
+    down until the content stops changing, and stitched into one image.
+    """
 
     finished = pyqtSignal(QImage)
     failed = pyqtSignal(str)
 
+    _PHASE_IDLE = "idle"
+    _PHASE_TO_TOP = "to_top"
+    _PHASE_CAPTURE = "capture"
+
     def __init__(
         self,
         parent_widget,
-        max_pages: int = 30,
+        max_pages: int = 60,
         scroll_delay_ms: int = 380,
         initial_delay_ms: int = 180,
         allow_self_capture: bool = False,
+        scroll_notches: int = 2,
+        step_margin_px: int = 100,
+        to_top_max_bursts: int = 60,
+        to_top_delay_ms: int = 170,
+        to_top_notches: int = 15,
+        debug_dir: str | None = None,
+        prefer_input_injection: bool = False,
     ) -> None:
         super().__init__(parent_widget)
         self.parent_widget = parent_widget
@@ -1162,10 +1184,20 @@ class ScrollingScreenshotCoordinator(QObject):
         self.scroll_delay_ms = scroll_delay_ms
         self.initial_delay_ms = initial_delay_ms
         self.allow_self_capture = allow_self_capture
+        self.debug_dir = debug_dir
+        # Skip the (async, unreliable) PostMessage method and scroll purely with
+        # SendInput cursor-wheel injection — the path that works on Chromium/
+        # Electron targets like VS Code and browsers.
+        self.prefer_input_injection = prefer_input_injection
+        self.scroll_notches = scroll_notches
+        self.step_margin_px = step_margin_px
+        self.to_top_max_bursts = to_top_max_bursts
+        self.to_top_delay_ms = to_top_delay_ms
+        self.to_top_notches = to_top_notches
 
         self.timer = QTimer(self)
         self.timer.setSingleShot(True)
-        self.timer.timeout.connect(self._capture_step)
+        self.timer.timeout.connect(self._on_timer_tick)
 
         self.hwnd = 0
         self.scroll_hwnd = 0
@@ -1173,10 +1205,19 @@ class ScrollingScreenshotCoordinator(QObject):
         self.viewport_rect = QRect()
         self.scroll_point_native: tuple[int, int] | None = None
         self.scroll_point_candidates: list[tuple[int, int]] = []
+        self.scroll_plan: list[tuple[str, tuple[int, int]]] = []
         self.scroll_method_index = 0
+        self.scroll_method_locked = False
         self.images: list[QImage] = []
         self.offsets: list[int] = []
         self.last_size = QSize()
+        self._phase = self._PHASE_IDLE
+        self._top_last_frame: QImage | None = None
+        self._top_bursts = 0
+        self._cursor_origin: tuple[int, int] | None = None
+        self._cursor_moved = False
+        self._px_per_notch: float | None = None
+        self._last_sent_notches = scroll_notches
 
     def start(
         self,
@@ -1198,13 +1239,9 @@ class ScrollingScreenshotCoordinator(QObject):
         self.scroll_point_native = None
         self.scroll_point_candidates = []
         self.scroll_method_index = 0
-        try:
-            own_hwnd = int(self.parent_widget.winId())
-        except (AttributeError, ValueError):
-            own_hwnd = 0
+        self.scroll_method_locked = False
 
-        own_capture_hwnd = 0 if self.allow_self_capture else own_hwnd
-        if not is_valid_capture_window(self.hwnd, own_capture_hwnd):
+        if not is_valid_capture_window(self.hwnd, self._own_capture_hwnd()):
             self.failed.emit("Selected window is invalid for scrolling screenshot.")
             return False
 
@@ -1231,41 +1268,112 @@ class ScrollingScreenshotCoordinator(QObject):
         self.scroll_point_candidates = [self.scroll_point_native]
         if qt_global_center != self.scroll_point_native:
             self.scroll_point_candidates.append(qt_global_center)
+        self.scroll_plan = self._build_scroll_plan()
+
+        self._cursor_origin = _current_cursor_native_point()
+        self._cursor_moved = False
+        # A real click is what activates Chromium/Electron panes so a synthetic
+        # wheel is honored; without it those targets silently ignore scrolling.
         self._activate_scroll_target(click=True)
         QApplication.processEvents()
 
         self.images = []
         self.offsets = []
         self.last_size = QSize()
+        self._top_last_frame = None
+        self._top_bursts = 0
+        self._phase = self._PHASE_TO_TOP
         self.timer.start(self.initial_delay_ms)
         return True
 
-    def _capture_step(self) -> None:
-        user32 = _get_user32()
-        if user32 is None:
-            self._fail("Windows screen capture APIs are unavailable.")
-            return
-
+    def _own_capture_hwnd(self) -> int:
         try:
             own_hwnd = int(self.parent_widget.winId())
         except (AttributeError, ValueError):
             own_hwnd = 0
-        own_capture_hwnd = 0 if self.allow_self_capture else own_hwnd
-        if not is_valid_capture_window(self.hwnd, own_capture_hwnd):
-            LOGGER.info("Target window became invalid during scrolling screenshot.")
-            self._finish()
-            return
+        return 0 if self.allow_self_capture else own_hwnd
 
+    def _grab_frame(self) -> QImage | None:
         if self.viewport_screen is not None and not self.viewport_rect.isEmpty():
             pixmap = grab_screen_region(self.viewport_screen, self.viewport_rect)
         else:
             pixmap = grab_window_pixmap(self.hwnd)
         if pixmap.isNull():
+            return None
+        image = pixmap.toImage()
+        return None if image.isNull() else image
+
+    def _on_timer_tick(self) -> None:
+        if self._phase == self._PHASE_TO_TOP:
+            self._scroll_to_top_step()
+        elif self._phase == self._PHASE_CAPTURE:
+            self._capture_step()
+
+    def _scroll_to_top_step(self) -> None:
+        """Drive the scroll target back to its top with upward wheel bursts.
+
+        Doubles as a probe for a working scroll method: once content visibly
+        moves, the current method is locked in for the capture phase.
+        """
+        if not is_valid_capture_window(self.hwnd, self._own_capture_hwnd()):
+            self._fail("Target window is no longer available.")
+            return
+
+        frame = self._grab_frame()
+        if frame is None:
             self._fail("Screen capture failed.")
             return
 
-        new_img = pixmap.toImage()
-        if new_img.isNull():
+        moved = (
+            self._top_last_frame is None
+            or self._top_last_frame.size() != frame.size()
+            or not are_images_similar(self._top_last_frame, frame)
+        )
+        click_to_activate = False
+        if moved:
+            if self._top_last_frame is not None:
+                self.scroll_method_locked = True
+            self._top_last_frame = frame
+            self._top_bursts += 1
+            if self._top_bursts > self.to_top_max_bursts:
+                LOGGER.info("Scroll-to-top burst limit reached. Starting capture.")
+                self._begin_capture()
+                return
+        elif not self.scroll_method_locked and self._advance_scroll_method():
+            # The current method moved nothing; re-click to activate the pane
+            # before trying the next one.
+            LOGGER.info("Scroll-to-top is probing a fallback scroll method.")
+            click_to_activate = True
+        else:
+            self._begin_capture()
+            return
+
+        self._activate_scroll_target(click=click_to_activate)
+        if not self._send_scroll(upward=True, notches=self.to_top_notches):
+            self._begin_capture()
+            return
+        self.timer.start(self.to_top_delay_ms)
+
+    def _begin_capture(self) -> None:
+        if not self.scroll_method_locked:
+            self.scroll_method_index = 0
+        self._top_last_frame = None
+        self.images = []
+        self.offsets = []
+        self.last_size = QSize()
+        self._px_per_notch = None
+        self._last_sent_notches = self.scroll_notches
+        self._phase = self._PHASE_CAPTURE
+        self.timer.start(self.initial_delay_ms)
+
+    def _capture_step(self) -> None:
+        if not is_valid_capture_window(self.hwnd, self._own_capture_hwnd()):
+            LOGGER.info("Target window became invalid during scrolling screenshot.")
+            self._finish()
+            return
+
+        new_img = self._grab_frame()
+        if new_img is None:
             self._fail("Screen capture failed.")
             return
 
@@ -1288,7 +1396,9 @@ class ScrollingScreenshotCoordinator(QObject):
             return
 
         expected_offset = None
-        if self.offsets:
+        if self._px_per_notch is not None and self._last_sent_notches > 0:
+            expected_offset = max(1, round(self._px_per_notch * self._last_sent_notches))
+        elif self.offsets:
             sorted_offsets = sorted(self.offsets)
             expected_offset = sorted_offsets[len(sorted_offsets) // 2]
         offset = find_vertical_offset(self.images[-1], new_img, expected_offset)
@@ -1299,6 +1409,11 @@ class ScrollingScreenshotCoordinator(QObject):
 
         self.images.append(new_img)
         self.offsets.append(offset)
+        per_notch = offset / max(1, self._last_sent_notches)
+        if self._px_per_notch is None:
+            self._px_per_notch = per_notch
+        else:
+            self._px_per_notch = (self._px_per_notch + per_notch) / 2.0
 
         if len(self.images) >= self.max_pages:
             LOGGER.info("Reached maximum page limit.")
@@ -1308,56 +1423,163 @@ class ScrollingScreenshotCoordinator(QObject):
         self._scroll_and_continue()
 
     def _scroll_and_continue(self) -> None:
-        if self.scroll_point_native is not None:
-            self._activate_scroll_target(click=True)
-            ok = self._send_scroll()
-        else:
-            ok = _send_page_down(self.scroll_hwnd)
-        if not ok:
+        self._activate_scroll_target()
+        notches = _stride_notches(
+            self.last_size.height() if not self.last_size.isEmpty() else 0,
+            self._px_per_notch,
+            self.step_margin_px,
+            self.scroll_notches,
+        )
+        self._last_sent_notches = notches
+        if not self._send_scroll(notches=notches):
             self._finish()
             return
         self.timer.start(self.scroll_delay_ms)
 
-    def _try_next_scroll_method(self) -> bool:
-        if self.scroll_method_index >= len(self.scroll_point_candidates):
+    def _build_scroll_plan(self) -> list[tuple[str, tuple[int, int]]]:
+        """Ordered list of (method, native-point) scroll attempts.
+
+        PostMessage to the control is tried first (cheap, doesn't move the
+        cursor) unless input injection is forced, then SendInput wheel at each
+        coordinate candidate. Probing walks this list until one moves content.
+        """
+        plan: list[tuple[str, tuple[int, int]]] = []
+        if (
+            not self.prefer_input_injection
+            and self.scroll_hwnd
+            and self.scroll_point_native is not None
+        ):
+            plan.append(("post", self.scroll_point_native))
+        for point in self.scroll_point_candidates:
+            plan.append(("input", point))
+        return plan
+
+    def _current_plan_entry(self) -> tuple[str, tuple[int, int]] | None:
+        if not self.scroll_plan:
+            return None
+        index = min(self.scroll_method_index, len(self.scroll_plan) - 1)
+        return self.scroll_plan[index]
+
+    def _advance_scroll_method(self) -> bool:
+        if self.scroll_method_index >= len(self.scroll_plan) - 1:
             return False
         self.scroll_method_index += 1
+        return True
+
+    def _try_next_scroll_method(self) -> bool:
+        if self.scroll_method_locked or not self._advance_scroll_method():
+            return False
         LOGGER.info("Retrying scrolling screenshot with fallback scroll method.")
+        self._activate_scroll_target(click=True)
         self._scroll_and_continue()
         return True
 
-    def _send_scroll(self) -> bool:
-        if self.scroll_method_index == 0 and self.scroll_hwnd and self.scroll_point_native:
-            return _post_wheel_scroll(self.scroll_hwnd, *self.scroll_point_native)
-
-        candidate_index = max(0, self.scroll_method_index - 1)
-        if not self.scroll_point_candidates:
+    def _send_scroll(self, *, upward: bool = False, notches: int | None = None) -> bool:
+        count = self.scroll_notches if notches is None else notches
+        entry = self._current_plan_entry()
+        if entry is None:
             return False
-        point_index = min(candidate_index, len(self.scroll_point_candidates) - 1)
-        x, y = self.scroll_point_candidates[point_index]
-        return _send_wheel_scroll_at(x, y)
+        kind, (x, y) = entry
+        if kind == "post":
+            return _post_wheel_scroll(self.scroll_hwnd, x, y, notches=count, upward=upward)
+        self._cursor_moved = True
+        return _send_wheel_scroll_at(x, y, notches=count, upward=upward)
 
-    def _activate_scroll_target(self, *, click: bool) -> None:
+    def _scroll_point_for_method(self) -> tuple[int, int] | None:
+        """Native point the current scroll method targets.
+
+        The activation click must land on the same point the wheel will use —
+        otherwise the click can miss the pane on DPI-scaled/multi-monitor setups
+        and the target is never activated for that method.
+        """
+        entry = self._current_plan_entry()
+        if entry is not None:
+            return entry[1]
+        return self.scroll_point_native
+
+    def _activate_scroll_target(self, *, click: bool = False) -> None:
         _force_foreground(self.hwnd)
         if self.scroll_hwnd:
             _focus_child_window(self.scroll_hwnd)
-        if click and self.scroll_point_native is not None:
-            _click_native_point(*self.scroll_point_native)
+        point = self._scroll_point_for_method()
+        if click and point is not None:
+            _click_native_point(*point)
+            self._cursor_moved = True
             if self.scroll_hwnd:
                 _focus_child_window(self.scroll_hwnd)
 
+    def _restore_cursor(self) -> None:
+        if not self._cursor_moved or self._cursor_origin is None:
+            return
+        user32 = _get_user32()
+        if user32 is None:
+            return
+        try:
+            user32.SetCursorPos.argtypes = [ctypes.c_int, ctypes.c_int]
+            user32.SetCursorPos.restype = wintypes.BOOL
+            user32.SetCursorPos(*self._cursor_origin)
+        except OSError as exc:
+            LOGGER.debug("Failed to restore cursor position: %s", exc)
+        self._cursor_moved = False
+
     def _finish(self) -> None:
         self.timer.stop()
+        self._phase = self._PHASE_IDLE
+        self._restore_cursor()
         if not self.images:
             self.failed.emit("No frames captured.")
             return
 
         stitched = stitch_images(self.images, self.offsets)
+        self._dump_debug(stitched)
         if stitched is None:
             self.failed.emit("Stitching failed.")
             return
+        if len(self.images) <= 1:
+            LOGGER.warning(
+                "Scrolling capture produced a single frame — the target never "
+                "scrolled. Returning a static screenshot of the visible area."
+            )
         self.finished.emit(stitched)
+
+    def _dump_debug(self, stitched: QImage | None) -> None:
+        """Save raw frames, the stitched result, and metrics when debugging.
+
+        Enabled by setting the TASKBAR_SCROLL_DEBUG_DIR environment variable;
+        the dump shows whether frames actually moved between scroll steps.
+        """
+        debug_dir = os.environ.get("TASKBAR_SCROLL_DEBUG_DIR") or self.debug_dir
+        if not debug_dir:
+            return
+        try:
+            os.makedirs(debug_dir, exist_ok=True)
+            for index, image in enumerate(self.images):
+                image.save(os.path.join(debug_dir, f"frame_{index:03d}.png"))
+            if stitched is not None:
+                stitched.save(os.path.join(debug_dir, "stitched.png"))
+            meta = {
+                "frame_count": len(self.images),
+                "offsets": self.offsets,
+                "px_per_notch": self._px_per_notch,
+                "scroll_method_index": self.scroll_method_index,
+                "scroll_method_locked": self.scroll_method_locked,
+                "scroll_hwnd": self.scroll_hwnd,
+                "capture_hwnd": self.hwnd,
+                "viewport_rect": [
+                    self.viewport_rect.x(),
+                    self.viewport_rect.y(),
+                    self.viewport_rect.width(),
+                    self.viewport_rect.height(),
+                ],
+            }
+            with open(os.path.join(debug_dir, "debug.json"), "w", encoding="utf-8") as handle:
+                json.dump(meta, handle, indent=2)
+            LOGGER.info("Wrote scroll capture debug dump to %s", debug_dir)
+        except OSError as exc:
+            LOGGER.warning("Failed to write scroll debug dump: %s", exc)
 
     def _fail(self, reason: str) -> None:
         self.timer.stop()
+        self._phase = self._PHASE_IDLE
+        self._restore_cursor()
         self.failed.emit(reason)

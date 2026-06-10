@@ -220,6 +220,30 @@ class TestAppChordServiceReload:
             ])
         assert failed == ["ctrl+alt+shift+t"]
 
+    def test_app_chord_fallback_on_native_failure(self) -> None:
+        service = AppChordService(prefer_native=True)
+        calls: list[str] = []
+
+        def add_hotkey(chord, _callback, **_kwargs):
+            calls.append(chord)
+            return object()
+
+        with patch.object(
+            service._native_hotkeys, "register", return_value=False  # pylint: disable=protected-access
+        ) as mock_register, patch(
+            "services.app_chord_service.keyboard.add_hotkey", side_effect=add_hotkey
+        ) as mock_add_hotkey, patch(
+            "services.app_chord_service.keyboard.remove_hotkey"
+        ):
+            failed = service.reload([
+                AppChordEntry("a", "x.exe", "", "ctrl+alt+shift+t"),
+            ])
+            assert failed == []
+            assert mock_register.call_count == 1
+            assert mock_add_hotkey.call_count == 1
+            assert calls == ["ctrl+alt+shift+t"]
+            service.unregister_all()
+
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Win32-only window helpers")
 class TestWin32Helpers:

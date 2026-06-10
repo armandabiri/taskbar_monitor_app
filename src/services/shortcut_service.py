@@ -26,10 +26,9 @@ class ShortcutService:
         if native_result is True:
             self.registered.append(hotkey)
             return
-        if native_result is False:
-            self.failed.append(hotkey)
-            return
 
+        # If native registration failed (native_result is False) or is unsupported (None),
+        # we fall back to the hook-based keyboard library.
         try:
             handle = keyboard.add_hotkey(
                 hotkey,
@@ -39,9 +38,22 @@ class ShortcutService:
             )
             self._handles.append(handle)
             self.registered.append(hotkey)
+            if native_result is False:
+                LOGGER.info(
+                    "Native registration failed for %r; "
+                    "fell back to hook-based registration successfully.",
+                    hotkey,
+                )
         except (ValueError, OSError) as exc:
             self.failed.append(hotkey)
-            LOGGER.warning("Could not register hotkey %r: %s", hotkey, exc)
+            if native_result is False:
+                LOGGER.warning(
+                    "Could not register hotkey %r natively or via hook fallback: %s",
+                    hotkey,
+                    exc,
+                )
+            else:
+                LOGGER.warning("Could not register hotkey %r: %s", hotkey, exc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self.failed.append(hotkey)
             LOGGER.warning("Unexpected error registering hotkey %r: %s", hotkey, exc)

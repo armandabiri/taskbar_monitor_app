@@ -471,18 +471,30 @@ class AppChordService:
         if native_result is True:
             self._hotkey_handles[chord] = None
             return
-        if native_result is False:
-            self.failed.append(chord)
-            return
 
+        # If native registration failed (native_result is False) or is unsupported (None),
+        # we fall back to the hook-based keyboard library.
         try:
             handle = keyboard.add_hotkey(
                 chord, callback, suppress=True, trigger_on_release=False,
             )
             self._hotkey_handles[chord] = handle
+            if native_result is False:
+                LOGGER.info(
+                    "Native registration failed for chord %r; "
+                    "fell back to hook-based registration successfully.",
+                    chord,
+                )
         except (ValueError, OSError) as exc:
             self.failed.append(chord)
-            LOGGER.warning("Could not register chord %r: %s", chord, exc)
+            if native_result is False:
+                LOGGER.warning(
+                    "Could not register chord %r natively or via hook fallback: %s",
+                    chord,
+                    exc,
+                )
+            else:
+                LOGGER.warning("Could not register chord %r: %s", chord, exc)
         except Exception as exc:  # pylint: disable=broad-exception-caught
             self.failed.append(chord)
             LOGGER.warning("Unexpected error registering chord %r: %s", chord, exc)

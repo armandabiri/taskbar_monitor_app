@@ -334,8 +334,18 @@ class TaskbarMonitor(QWidget):
                 + ", ".join(failed_chords),
             )
 
-        # Scrolling screenshot coordinator
-        self.scrolling_coordinator = ScrollingScreenshotCoordinator(self)
+        # Scrolling screenshot coordinator.
+        # TEMP (scroll-capture diagnostics): dump every capture's raw frames +
+        # stitched result to .intelag/reports/scroll_live so failures can be
+        # inspected. Remove debug_dir once scrolling capture is confirmed good.
+        from pathlib import Path as _Path
+
+        scroll_debug_dir = str(
+            _Path(__file__).resolve().parents[1] / ".intelag" / "reports" / "scroll_live"
+        )
+        self.scrolling_coordinator = ScrollingScreenshotCoordinator(
+            self, debug_dir=scroll_debug_dir
+        )
         self.scrolling_coordinator.finished.connect(self._on_scrolling_capture_finished)
         self.scrolling_coordinator.failed.connect(self._on_scrolling_capture_failed)
 
