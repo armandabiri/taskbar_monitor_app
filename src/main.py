@@ -4,11 +4,22 @@ import os
 import sys
 
 import psutil
-from PyQt6.QtCore import QEvent, QPoint, QSettings, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtCore import (
+    QEvent,
+    QPoint,
+    QRect,
+    QSettings,
+    Qt,
+    QThread,
+    QTimer,
+    QUrl,
+    pyqtSignal,
+)
 from PyQt6.QtGui import (
     QContextMenuEvent,
     QDesktopServices,
     QIcon,
+    QImage,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -65,6 +76,16 @@ from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_t
 from services.resource_manager import (
     load_active_aggressive_profile,
     load_active_smart_profile,
+)
+from services.screenshot_service import (
+    ScrollingScreenshotCoordinator,
+    crop_screen_snapshot,
+    get_foreground_window,
+    grab_screen_region,
+    grab_screen_snapshot,
+    grab_window_pixmap,
+    is_valid_capture_window,
+    window_from_qt_point,
 )
 from services.shortcut_service import ShortcutService
 from services.system_info import (
@@ -168,6 +189,10 @@ class TaskbarMonitor(QWidget):
     request_release = pyqtSignal()
     request_aggressive = pyqtSignal()
     request_toggle_click_through = pyqtSignal()
+    request_capture_regional = pyqtSignal()
+    request_capture_active = pyqtSignal()
+    request_capture_scrolling = pyqtSignal()
+    request_capture_last_region = pyqtSignal()
 
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
@@ -183,6 +208,10 @@ class TaskbarMonitor(QWidget):
         self.request_toggle_click_through.connect(
             lambda: self.set_click_through(not self.click_through)
         )
+        self.request_capture_regional.connect(self.capture_regional)
+        self.request_capture_active.connect(self.capture_active_window)
+        self.request_capture_scrolling.connect(self.capture_scrolling)
+        self.request_capture_last_region.connect(self.capture_last_region)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -200,6 +229,18 @@ class TaskbarMonitor(QWidget):
             self.settings, "autohide_fullscreen", DEFAULT_AUTOHIDE_FULLSCREEN))
         self.minimize_to_tray = bool(read_setting_int(
             self.settings, "minimize_to_tray", DEFAULT_MINIMIZE_TO_TRAY))
+
+        # Load last capture region
+        rect_x = read_setting_int(self.settings, "last_capture_rect_x", -1)
+        rect_y = read_setting_int(self.settings, "last_capture_rect_y", -1)
+        rect_w = read_setting_int(self.settings, "last_capture_rect_w", -1)
+        rect_h = read_setting_int(self.settings, "last_capture_rect_h", -1)
+        self.last_capture_screen_name = self.settings.value("last_capture_screen_name", "")
+        if rect_x != -1 and rect_y != -1 and rect_w != -1 and rect_h != -1:
+            from PyQt6.QtCore import QRect
+            self.last_capture_rect = QRect(rect_x, rect_y, rect_w, rect_h)
+        else:
+            self.last_capture_rect = None
 
         self.old_net = psutil.net_io_counters()
         self.old_disk = psutil.disk_io_counters()
@@ -246,6 +287,7 @@ class TaskbarMonitor(QWidget):
 
         self.process_popup: TopProcessesPopup | None = None
         self.clipboard_popup: ClipboardHistoryPopup | None = None
+        self.selectors: list[QWidget] = []
         self._last_release_error_count = 0
         self._smart_profile = load_active_smart_profile(self.settings)
         self._aggressive_profile = load_active_aggressive_profile(self.settings)
@@ -291,6 +333,11 @@ class TaskbarMonitor(QWidget):
                 f"Could not register {len(failed_chords)} chord prefix(es): "
                 + ", ".join(failed_chords),
             )
+
+        # Scrolling screenshot coordinator
+        self.scrolling_coordinator = ScrollingScreenshotCoordinator(self)
+        self.scrolling_coordinator.finished.connect(self._on_scrolling_capture_finished)
+        self.scrolling_coordinator.failed.connect(self._on_scrolling_capture_failed)
 
         # System tray
         self.tray = build_tray(
@@ -996,6 +1043,232 @@ class TaskbarMonitor(QWidget):
             return f"{bytes_per_second / MB:.1f}M"
         return f"{bytes_per_second / KB:.0f}K"
 
+    def _restore_after_screenshot(self) -> None:
+        self.show()
+        self.raise_()
+        self._apply_win32_topmost()
+
+    def _close_screenshot_selectors(self, *, restore: bool) -> None:
+        for selector in list(self.selectors):
+            selector.close()
+        self.selectors.clear()
+        if restore:
+            self._restore_after_screenshot()
+
+    def _screen_by_name(self, screen_name: str):
+        for screen in QApplication.screens():
+            if screen.name() == screen_name:
+                return screen
+        return QApplication.primaryScreen()
+
+    def _store_last_capture_region(self, screen, local_rect: QRect) -> None:
+        self.last_capture_rect = QRect(local_rect)
+        self.last_capture_screen_name = screen.name()
+        self.settings.setValue("last_capture_rect_x", local_rect.x())
+        self.settings.setValue("last_capture_rect_y", local_rect.y())
+        self.settings.setValue("last_capture_rect_w", local_rect.width())
+        self.settings.setValue("last_capture_rect_h", local_rect.height())
+        self.settings.setValue("last_capture_screen_name", screen.name())
+        self.settings.sync()
+
+    def _copy_pixmap_to_clipboard(self, pixmap, failure_message: str) -> bool:
+        try:
+            if pixmap.isNull():
+                LOGGER.warning("%s", failure_message)
+                NotificationService.notify(APP_NAME, failure_message)
+                return False
+            image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
+            self.clipboard.setImage(image)
+            return True
+        finally:
+            self._restore_after_screenshot()
+
+    def _copy_region_to_clipboard(
+        self,
+        screen,
+        local_rect: QRect,
+    ) -> bool:
+        QApplication.processEvents()
+        pixmap = grab_screen_region(screen, local_rect)
+        return self._copy_pixmap_to_clipboard(
+            pixmap,
+            "Failed to capture screenshot region.",
+        )
+
+    def capture_regional(self) -> None:
+        """Trigger regional screenshot using a custom interactive capture overlay."""
+        self._close_screenshot_selectors(restore=False)
+        self.hide()
+        QApplication.processEvents()
+        QTimer.singleShot(50, self._show_region_selectors)
+
+    def _show_region_selectors(self) -> None:
+        from PyQt6.QtGui import QGuiApplication
+
+        from ui.screenshot_overlay import RegionSelector
+
+        screens = QGuiApplication.screens()
+        if not screens:
+            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
+            self._restore_after_screenshot()
+            return
+
+        screen_snapshots = []
+        for screen in screens:
+            snapshot = grab_screen_snapshot(screen)
+            if not snapshot.isNull():
+                screen_snapshots.append((screen, snapshot))
+
+        if not screen_snapshots:
+            NotificationService.notify(APP_NAME, "Failed to capture screen for selection.")
+            self._restore_after_screenshot()
+            return
+
+        def on_selected(local_rect: QRect, screen, snapshot) -> None:
+            selected_rect = QRect(local_rect)
+            selected_screen = screen
+            selected_snapshot = snapshot
+            self._close_screenshot_selectors(restore=False)
+
+            def capture_after_overlay_closes() -> None:
+                pixmap = crop_screen_snapshot(
+                    selected_snapshot,
+                    selected_screen,
+                    selected_rect,
+                )
+                copied = self._copy_pixmap_to_clipboard(
+                    pixmap,
+                    "Failed to capture screenshot region.",
+                )
+                if copied and not selected_rect.isEmpty():
+                    self._store_last_capture_region(selected_screen, selected_rect)
+
+            QTimer.singleShot(20, capture_after_overlay_closes)
+
+        def on_cancelled() -> None:
+            self._close_screenshot_selectors(restore=True)
+
+        for screen, snapshot in screen_snapshots:
+            selector = RegionSelector(screen, snapshot, on_selected, on_cancelled)
+            self.selectors.append(selector)
+            selector.show()
+
+    def capture_last_region(self) -> None:
+        """Repeat screenshot of the last captured region."""
+        if self.last_capture_rect is None or not self.last_capture_screen_name:
+            NotificationService.notify(
+                APP_NAME,
+                "No previous regional screenshot found to repeat.",
+            )
+            return
+
+        target_screen = self._screen_by_name(str(self.last_capture_screen_name))
+        if target_screen is None:
+            NotificationService.notify(APP_NAME, "No screen found for repeating screenshot.")
+            return
+
+        local_rect = QRect(self.last_capture_rect)
+        self.hide()
+        QApplication.processEvents()
+        QTimer.singleShot(
+            80,
+            lambda: self._copy_region_to_clipboard(
+                target_screen,
+                local_rect,
+            ),
+        )
+
+    def capture_active_window(self) -> None:
+        """Capture the currently active foreground window to the clipboard."""
+        hwnd = get_foreground_window()
+
+        try:
+            own_hwnd = int(self.winId())
+        except (AttributeError, ValueError):
+            own_hwnd = 0
+
+        if not is_valid_capture_window(hwnd, own_hwnd):
+            LOGGER.warning("Active window is invalid for screenshot.")
+            NotificationService.notify(APP_NAME, "No active window found for screenshot.")
+            return
+
+        self.hide()
+        QApplication.processEvents()
+        QTimer.singleShot(50, lambda: self._capture_window_to_clipboard(hwnd))
+
+    def _capture_window_to_clipboard(self, hwnd: int) -> None:
+        try:
+            pixmap = grab_window_pixmap(hwnd)
+            if pixmap.isNull():
+                LOGGER.warning("Active window screenshot returned a null pixmap.")
+                NotificationService.notify(APP_NAME, "Failed to capture active window.")
+                return
+            self.clipboard.setPixmap(pixmap)
+        finally:
+            self._restore_after_screenshot()
+
+    def capture_scrolling(self) -> None:
+        """Trigger scrolling screenshot by first letting the user click a target window."""
+        self._close_screenshot_selectors(restore=False)
+        self.hide()
+        QApplication.processEvents()
+        QTimer.singleShot(50, self._show_scroll_selectors)
+
+    def _show_scroll_selectors(self) -> None:
+        from PyQt6.QtGui import QGuiApplication
+
+        from ui.screenshot_overlay import ScrollSelector
+
+        screens = QGuiApplication.screens()
+        if not screens:
+            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
+            self._restore_after_screenshot()
+            return
+
+        def on_selected(global_pos: QPoint) -> None:
+            clicked_pos = QPoint(global_pos)
+            self._close_screenshot_selectors(restore=False)
+
+            def start_after_overlay_closes() -> None:
+                hwnd = window_from_qt_point(clicked_pos)
+                try:
+                    own_hwnd = int(self.winId())
+                except (AttributeError, ValueError):
+                    own_hwnd = 0
+                if not is_valid_capture_window(hwnd, own_hwnd):
+                    NotificationService.notify(APP_NAME, "No window found at clicked location.")
+                    self._restore_after_screenshot()
+                    return
+                self.scrolling_coordinator.start(hwnd)
+
+            QTimer.singleShot(35, start_after_overlay_closes)
+
+        def on_cancelled() -> None:
+            self._close_screenshot_selectors(restore=True)
+
+        for screen in screens:
+            selector = ScrollSelector(screen, on_selected, on_cancelled)
+            self.selectors.append(selector)
+            selector.show()
+
+    def _on_scrolling_capture_finished(self, image: QImage) -> None:
+        """Called when scrolling capture sequence completes successfully."""
+        if self.clipboard is not None:
+            self.clipboard.setImage(image)
+        self.show()
+        self.raise_()
+        self._apply_win32_topmost()
+
+    def _on_scrolling_capture_failed(self, reason: str) -> None:
+        """Called when scrolling capture sequence fails."""
+        NotificationService.notify(
+            APP_NAME,
+            f"Scrolling screenshot failed: {reason}"
+        )
+        self.show()
+        self.raise_()
+        self._apply_win32_topmost()
+
     def update_stats(self) -> None:
         """Poll system stats and refresh monitor widgets."""
         try:
@@ -1269,6 +1542,18 @@ def main() -> int:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         handlers=[logging.StreamHandler(), logging.FileHandler(runtime_log_path(), encoding="utf-8")],
     )
+    # Set Per-Monitor DPI awareness before creating QApplication
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
+    except Exception:
+        try:
+            ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        except Exception:
+            try:
+                ctypes.windll.user32.SetProcessDPIAware()
+            except Exception:
+                pass
+
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)  # keep running when tray-only
     psutil.cpu_percent(interval=CPU_WARMUP_INTERVAL_SECONDS)

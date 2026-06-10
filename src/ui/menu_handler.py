@@ -100,6 +100,18 @@ class MonitorProtocol(Protocol):
     def show_recording_settings(self) -> None:
         """Open the microphone recording settings dialog."""
 
+    def capture_regional(self) -> None:
+        """Trigger regional screenshot."""
+
+    def capture_last_region(self) -> None:
+        """Trigger repeat regional screenshot."""
+
+    def capture_active_window(self) -> None:
+        """Trigger active window screenshot."""
+
+    def capture_scrolling(self) -> None:
+        """Trigger scrolling active window screenshot."""
+
     def reload_resource_profiles(self) -> None:
         """Reload smart/aggressive profile bindings from settings."""
 
@@ -171,7 +183,7 @@ class AppMenuBuilder:
             action.setCheckable(True)
             if isinstance(parent, MonitorProtocol):
                 action.setChecked(parent.interval == milliseconds)
-            
+
             # Use a closure to capture milliseconds correctly
             def make_handler(ms_val: int):
                 def handler(_checked: bool):
@@ -212,6 +224,9 @@ class AppMenuBuilder:
 
         if isinstance(parent, MonitorProtocol):
             AppMenuBuilder._add_recording_submenu(menu, parent)
+
+        if isinstance(parent, MonitorProtocol):
+            AppMenuBuilder._add_screenshot_submenu(menu, parent)
 
         cleanup_history_action = QAction("Cleanup History…", parent)
         if isinstance(parent, MonitorProtocol):
@@ -421,6 +436,29 @@ class AppMenuBuilder:
         settings_action = QAction("Settings…", widget_parent)
         settings_action.triggered.connect(lambda _checked=False: parent.show_recording_settings())
         recording_menu.addAction(settings_action)
+
+    @staticmethod
+    def _add_screenshot_submenu(menu: QMenu, parent: "MonitorProtocol") -> None:
+        """Build the screenshot submenu."""
+        widget_parent = parent if isinstance(parent, QWidget) else None
+        screenshot_menu = QMenu("Screenshot", widget_parent)
+        menu.addMenu(screenshot_menu)
+
+        regional_action = QAction("Capture Region [Shift+Win+R]", widget_parent)
+        regional_action.triggered.connect(lambda _checked=False: parent.capture_regional())
+        screenshot_menu.addAction(regional_action)
+
+        repeat_action = QAction("Repeat Last Region Capture [Shift+Win+Alt+R]", widget_parent)
+        repeat_action.triggered.connect(lambda _checked=False: parent.capture_last_region())
+        screenshot_menu.addAction(repeat_action)
+
+        active_action = QAction("Capture Active Window [Shift+Win+W]", widget_parent)
+        active_action.triggered.connect(lambda _checked=False: parent.capture_active_window())
+        screenshot_menu.addAction(active_action)
+
+        scrolling_action = QAction("Capture Scrolling Window [Shift+Win+S]", widget_parent)
+        scrolling_action.triggered.connect(lambda _checked=False: parent.capture_scrolling())
+        screenshot_menu.addAction(scrolling_action)
 
 
 def _make_scope_toggler(parent: "MonitorProtocol", key: str):

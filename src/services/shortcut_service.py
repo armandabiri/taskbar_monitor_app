@@ -2,6 +2,7 @@
 
 import logging
 from typing import Any, Callable
+
 import keyboard
 
 LOGGER = logging.getLogger(__name__)
@@ -14,11 +15,18 @@ class ShortcutService:
         """Initialize shortcuts state."""
         self.failed: list[str] = []
         self.registered: list[str] = []
+        self._handles: list[Any] = []
 
     def _try_register(self, hotkey: str, callback: Callable[[], Any]) -> None:
         """Register one hotkey, track success/failure individually."""
         try:
-            keyboard.add_hotkey(hotkey, callback, suppress=False)
+            handle = keyboard.add_hotkey(
+                hotkey,
+                callback,
+                suppress=True,
+                trigger_on_release=False,
+            )
+            self._handles.append(handle)
             self.registered.append(hotkey)
         except (ValueError, OSError) as exc:
             self.failed.append(hotkey)
@@ -32,6 +40,7 @@ class ShortcutService:
 
         Returns the list of hotkeys that failed to register.
         """
+        self.unregister_all()
         self.failed = []
         self.registered = []
 
@@ -51,7 +60,8 @@ class ShortcutService:
                     return lambda: monitor.countdown_timer.request_start.emit(m)
                 callback = make_timer_callback(mins)
             else:
-                callback = lambda: monitor.countdown_timer.request_stop.emit()
+                def callback() -> None:
+                    monitor.countdown_timer.request_stop.emit()
             self._try_register(hk, callback)
 
         def adjust_plus() -> None:
@@ -72,6 +82,18 @@ class ShortcutService:
             "ctrl+shift+alt+c",
             lambda: monitor.request_toggle_click_through.emit(),
         )
+        # Screenshot hotkeys
+        self._try_register("windows+shift+r", lambda: monitor.request_capture_regional.emit())
+        self._try_register("windows+shift+w", lambda: monitor.request_capture_active.emit())
+        self._try_register("windows+shift+s", lambda: monitor.request_capture_scrolling.emit())
+        self._try_register(
+            "windows+shift+alt+r",
+            lambda: monitor.request_capture_last_region.emit(),
+        )
+        self._try_register(
+            "ctrl+shift+alt+r",
+            lambda: monitor.request_capture_last_region.emit(),
+        )
 
         LOGGER.info(
             "Shortcut registration: %d succeeded, %d failed",
@@ -81,7 +103,11 @@ class ShortcutService:
 
     def unregister_all(self) -> None:
         """Clear all registered hotkeys."""
-        try:
-            keyboard.unhook_all()
-        except Exception as exc:  # pylint: disable=broad-exception-caught
-            LOGGER.debug("unhook_all failed (non-fatal): %s", exc)
+        for handle in list(self._handles):
+            try:
+                keyboard.remove_hotkey(handle)
+            except (KeyError, ValueError):
+                pass
+            except Exception as exc:  # pylint: disable=broad-exception-caught
+                LOGGER.debug("remove_hotkey failed (non-fatal): %s", exc)
+        self._handles.clear()
