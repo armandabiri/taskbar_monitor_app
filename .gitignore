@@ -5,3 +5,19 @@ dist_pyinstaller/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Intelag plan folders must remain trackable
+!.intelag/
+!.intelag/plans/
+!.intelag/plans/**
+!.intelag/issues/
+!.intelag/issues/**
+!.intelag/reports/
+!.intelag/reports/**
+
+# Intelag VSIX-managed folders (own remotes, not project content)
+.intelag/.agent/
+.intelag/dashboard-tools/
+.intelag/.agent-backups/
+.intelag/.agent-tmp/
+.intelag/.dashboard-tools-tmp/

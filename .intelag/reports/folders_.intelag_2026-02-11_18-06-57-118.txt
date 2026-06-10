@@ -1,0 +1,26 @@
+.intelag/
+├── .agent/
+│   ├── artifacts/
+│   ├── chat_summary/
+│   ├── instructions/
+│   ├── issues/
+│   ├── reports/
+│   └── requests/
+├── .logs/
+├── commands/
+│   └── scripts/
+├── issues/
+├── python/
+├── reports/
+├── resources/
+├── templates/
+└── tools/
+    ├── log_lazy_formatter/
+    │   └── models/
+    └── type_annotation_fixer/
+        └── modules/
+
+---
+Total Directories: 19
+Total Files: 0
+Extensions:

@@ -241,3 +241,18 @@ terminal/
 errors/
 
 .intleaZ
+
+# Intelag plan folders must remain trackable
+!plans/
+!plans/**
+!issues/
+!issues/**
+!reports/
+!reports/**
+
+# Intelag VSIX-managed folders (own remotes, not project content)
+.agent/
+dashboard-tools/
+.agent-backups/
+.agent-tmp/
+.dashboard-tools-tmp/
