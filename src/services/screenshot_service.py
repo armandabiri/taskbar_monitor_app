@@ -21,6 +21,8 @@ _VK_NEXT = 0x22
 _KEYEVENTF_KEYUP = 0x0002
 _GA_ROOT = 2
 _SW_RESTORE = 9
+_WM_KEYDOWN = 0x0100
+_WM_KEYUP = 0x0101
 _ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
 
@@ -75,6 +77,14 @@ class _NativeMonitor:
     @property
     def height(self) -> int:
         return self.bottom - self.top
+
+
+@dataclass(frozen=True)
+class WindowSelection:
+    """Window handles resolved from a scroll-selector click."""
+
+    capture_hwnd: int
+    scroll_hwnd: int
 
 
 def _get_user32():
@@ -257,25 +267,69 @@ def qt_global_point_to_native(point: QPoint) -> tuple[int, int]:
     return (x, y)
 
 
-def window_from_qt_point(point: QPoint) -> int:
-    """Return the root HWND under a Qt global point."""
+def _window_selection_from_native_point(x: int, y: int) -> WindowSelection | None:
     user32 = _get_user32()
     if user32 is None:
-        return 0
-    native_x, native_y = qt_global_point_to_native(point)
+        return None
     try:
         user32.WindowFromPoint.argtypes = [_POINT]
         user32.WindowFromPoint.restype = wintypes.HWND
         user32.GetAncestor.argtypes = [wintypes.HWND, wintypes.UINT]
         user32.GetAncestor.restype = wintypes.HWND
-        hwnd = int(user32.WindowFromPoint(_POINT(native_x, native_y)))
+        hwnd = int(user32.WindowFromPoint(_POINT(x, y)))
         if not hwnd:
-            return 0
+            return None
         root = int(user32.GetAncestor(hwnd, _GA_ROOT))
-        return root or hwnd
+        return WindowSelection(capture_hwnd=root or hwnd, scroll_hwnd=hwnd)
     except OSError as exc:
         LOGGER.debug("WindowFromPoint failed: %s", exc)
-        return 0
+        return None
+
+
+def _current_cursor_native_point() -> tuple[int, int] | None:
+    user32 = _get_user32()
+    if user32 is None:
+        return None
+    try:
+        user32.GetCursorPos.argtypes = [ctypes.POINTER(_POINT)]
+        user32.GetCursorPos.restype = wintypes.BOOL
+        point = _POINT()
+        if user32.GetCursorPos(ctypes.byref(point)):
+            return (int(point.x), int(point.y))
+    except OSError as exc:
+        LOGGER.debug("GetCursorPos failed: %s", exc)
+    return None
+
+
+def window_selections_from_qt_point(point: QPoint) -> list[WindowSelection]:
+    """Return possible window selections under a Qt global point.
+
+    Qt global mouse coordinates can be logical or native depending on the DPI
+    awareness path in use, so probe both interpretations and de-duplicate.
+    """
+    candidates = [(point.x(), point.y()), qt_global_point_to_native(point)]
+    cursor_point = _current_cursor_native_point()
+    if cursor_point is not None:
+        candidates.append(cursor_point)
+
+    selections: list[WindowSelection] = []
+    seen: set[tuple[int, int]] = set()
+    for x, y in candidates:
+        selection = _window_selection_from_native_point(x, y)
+        if selection is None:
+            continue
+        key = (selection.capture_hwnd, selection.scroll_hwnd)
+        if key in seen:
+            continue
+        seen.add(key)
+        selections.append(selection)
+    return selections
+
+
+def window_from_qt_point(point: QPoint) -> int:
+    """Return the root HWND under a Qt global point."""
+    selections = window_selections_from_qt_point(point)
+    return selections[0].capture_hwnd if selections else 0
 
 
 def is_valid_capture_window(hwnd: int, own_hwnd: int = 0) -> bool:
@@ -361,6 +415,34 @@ def _force_foreground(hwnd: int) -> bool:
     except OSError as exc:
         LOGGER.debug("SetForegroundWindow failed for hwnd=%s: %s", hwnd, exc)
         return False
+
+
+def _focus_child_window(hwnd: int) -> None:
+    user32 = _get_user32()
+    kernel32 = _get_kernel32()
+    if user32 is None or kernel32 is None or not hwnd:
+        return
+    try:
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.c_void_p]
+        user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+        user32.AttachThreadInput.argtypes = [wintypes.DWORD, wintypes.DWORD, wintypes.BOOL]
+        user32.AttachThreadInput.restype = wintypes.BOOL
+        user32.SetFocus.argtypes = [wintypes.HWND]
+        user32.SetFocus.restype = wintypes.HWND
+        kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+
+        target_thread = int(user32.GetWindowThreadProcessId(hwnd, None))
+        current_thread = int(kernel32.GetCurrentThreadId())
+        attached = False
+        if target_thread and target_thread != current_thread:
+            attached = bool(user32.AttachThreadInput(current_thread, target_thread, True))
+        try:
+            user32.SetFocus(hwnd)
+        finally:
+            if attached:
+                user32.AttachThreadInput(current_thread, target_thread, False)
+    except OSError as exc:
+        LOGGER.debug("SetFocus failed for hwnd=%s: %s", hwnd, exc)
 
 
 def _grab_native_rect(
@@ -603,10 +685,32 @@ def grab_window_pixmap(hwnd: int) -> QPixmap:
     return screen.grabWindow(hwnd)
 
 
-def _send_page_down() -> bool:
+def _post_page_down(hwnd: int) -> bool:
+    user32 = _get_user32()
+    if user32 is None or not hwnd:
+        return False
+    try:
+        user32.PostMessageW.argtypes = [
+            wintypes.HWND,
+            wintypes.UINT,
+            wintypes.WPARAM,
+            wintypes.LPARAM,
+        ]
+        user32.PostMessageW.restype = wintypes.BOOL
+        down_ok = bool(user32.PostMessageW(hwnd, _WM_KEYDOWN, _VK_NEXT, 0))
+        up_ok = bool(user32.PostMessageW(hwnd, _WM_KEYUP, _VK_NEXT, 0))
+        return down_ok and up_ok
+    except OSError as exc:
+        LOGGER.debug("PostMessage PageDown failed for hwnd=%s: %s", hwnd, exc)
+        return False
+
+
+def _send_page_down(hwnd: int = 0) -> bool:
     user32 = _get_user32()
     if user32 is None:
         return False
+    if hwnd:
+        _focus_child_window(hwnd)
     try:
         user32.keybd_event.argtypes = [
             wintypes.BYTE,
@@ -619,7 +723,7 @@ def _send_page_down() -> bool:
         return True
     except OSError as exc:
         LOGGER.warning("Failed to send PageDown keypress: %s", exc)
-        return False
+        return _post_page_down(hwnd)
 
 
 def are_images_similar(img1: QImage, img2: QImage, threshold: float = 0.98) -> bool:
@@ -762,11 +866,12 @@ class ScrollingScreenshotCoordinator(QObject):
         self.timer.timeout.connect(self._capture_step)
 
         self.hwnd = 0
+        self.scroll_hwnd = 0
         self.images: list[QImage] = []
         self.offsets: list[int] = []
         self.last_size = QSize()
 
-    def start(self, target_hwnd: int = 0) -> bool:
+    def start(self, target_hwnd: int = 0, scroll_hwnd: int = 0) -> bool:
         """Initialize and start the scrolling screenshot capture sequence."""
         user32 = _get_user32()
         if user32 is None:
@@ -774,6 +879,7 @@ class ScrollingScreenshotCoordinator(QObject):
             return False
 
         self.hwnd = target_hwnd or get_foreground_window()
+        self.scroll_hwnd = scroll_hwnd or self.hwnd
         try:
             own_hwnd = int(self.parent_widget.winId())
         except (AttributeError, ValueError):
@@ -784,6 +890,8 @@ class ScrollingScreenshotCoordinator(QObject):
             return False
 
         _force_foreground(self.hwnd)
+        if self.scroll_hwnd != self.hwnd:
+            _focus_child_window(self.scroll_hwnd)
         QApplication.processEvents()
 
         self.images = []
@@ -846,7 +954,7 @@ class ScrollingScreenshotCoordinator(QObject):
         self._scroll_and_continue()
 
     def _scroll_and_continue(self) -> None:
-        if not _send_page_down():
+        if not _send_page_down(self.scroll_hwnd):
             self._finish()
             return
         self.timer.start(self.scroll_delay_ms)

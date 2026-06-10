@@ -85,7 +85,7 @@ from services.screenshot_service import (
     grab_screen_snapshot,
     grab_window_pixmap,
     is_valid_capture_window,
-    window_from_qt_point,
+    window_selections_from_qt_point,
 )
 from services.shortcut_service import ShortcutService
 from services.system_info import (
@@ -1227,21 +1227,41 @@ class TaskbarMonitor(QWidget):
 
         def on_selected(global_pos: QPoint) -> None:
             clicked_pos = QPoint(global_pos)
+            selector_hwnds: set[int] = set()
+            for selector in self.selectors:
+                try:
+                    selector_hwnds.add(int(selector.winId()))
+                except (AttributeError, ValueError):
+                    pass
             self._close_screenshot_selectors(restore=False)
 
             def start_after_overlay_closes() -> None:
-                hwnd = window_from_qt_point(clicked_pos)
                 try:
                     own_hwnd = int(self.winId())
                 except (AttributeError, ValueError):
                     own_hwnd = 0
-                if not is_valid_capture_window(hwnd, own_hwnd):
-                    NotificationService.notify(APP_NAME, "No window found at clicked location.")
-                    self._restore_after_screenshot()
-                    return
-                self.scrolling_coordinator.start(hwnd)
+                excluded_hwnds = set(selector_hwnds)
+                if own_hwnd:
+                    excluded_hwnds.add(own_hwnd)
 
-            QTimer.singleShot(35, start_after_overlay_closes)
+                for selection in window_selections_from_qt_point(clicked_pos):
+                    if (
+                        selection.capture_hwnd in excluded_hwnds
+                        or selection.scroll_hwnd in excluded_hwnds
+                    ):
+                        continue
+                    if not is_valid_capture_window(selection.capture_hwnd, own_hwnd):
+                        continue
+                    self.scrolling_coordinator.start(
+                        selection.capture_hwnd,
+                        selection.scroll_hwnd,
+                    )
+                    return
+
+                NotificationService.notify(APP_NAME, "No window found at clicked location.")
+                self._restore_after_screenshot()
+
+            QTimer.singleShot(120, start_after_overlay_closes)
 
         def on_cancelled() -> None:
             self._close_screenshot_selectors(restore=True)
