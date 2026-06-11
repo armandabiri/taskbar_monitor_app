@@ -103,6 +103,9 @@ class MonitorProtocol(Protocol):
     def capture_regional(self) -> None:
         """Trigger regional screenshot."""
 
+    def capture_element(self) -> None:
+        """Trigger smart element screenshot."""
+
     def capture_last_region(self) -> None:
         """Trigger repeat regional screenshot."""
 
@@ -447,6 +450,10 @@ class AppMenuBuilder:
         regional_action = QAction("Capture Region [Shift+Win+R]", widget_parent)
         regional_action.triggered.connect(lambda _checked=False: parent.capture_regional())
         screenshot_menu.addAction(regional_action)
+
+        element_action = QAction("Capture Element (Smart) [Shift+Win+E]", widget_parent)
+        element_action.triggered.connect(lambda _checked=False: parent.capture_element())
+        screenshot_menu.addAction(element_action)
 
         repeat_action = QAction("Repeat Last Region Capture [Shift+Win+Alt+R]", widget_parent)
         repeat_action.triggered.connect(lambda _checked=False: parent.capture_last_region())

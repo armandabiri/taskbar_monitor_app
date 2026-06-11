@@ -80,6 +80,7 @@ from services.resource_manager import (
 from services.screenshot_service import (
     ScrollingScreenshotCoordinator,
     crop_screen_snapshot,
+    element_rects_for_screen,
     get_foreground_window,
     grab_screen_region,
     grab_screen_snapshot,
@@ -193,6 +194,7 @@ class TaskbarMonitor(QWidget):
     request_capture_active = pyqtSignal()
     request_capture_scrolling = pyqtSignal()
     request_capture_last_region = pyqtSignal()
+    request_capture_element = pyqtSignal()
 
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
@@ -212,6 +214,7 @@ class TaskbarMonitor(QWidget):
         self.request_capture_active.connect(self.capture_active_window)
         self.request_capture_scrolling.connect(self.capture_scrolling)
         self.request_capture_last_region.connect(self.capture_last_region)
+        self.request_capture_element.connect(self.capture_element)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -1163,6 +1166,69 @@ class TaskbarMonitor(QWidget):
 
         for screen, snapshot in screen_snapshots:
             selector = RegionSelector(screen, snapshot, on_selected, on_cancelled)
+            self.selectors.append(selector)
+            selector.show()
+
+    def capture_element(self) -> None:
+        """Trigger smart element capture using a hover-highlight overlay."""
+        self._close_screenshot_selectors(restore=False)
+        self.hide()
+        QApplication.processEvents()
+        QTimer.singleShot(80, self._show_element_selectors)
+
+    def _show_element_selectors(self) -> None:
+        from PyQt6.QtGui import QGuiApplication
+
+        from services.uia_service import collect_element_rects
+        from ui.screenshot_overlay import ElementSelector
+
+        screens = QGuiApplication.screens()
+        if not screens:
+            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
+            self._restore_after_screenshot()
+            return
+
+        # Resolve element rectangles once, while the desktop is still uncovered,
+        # then hit-test them locally on each per-screen overlay.
+        native_rects = collect_element_rects()
+        screen_data = []
+        for screen in screens:
+            snapshot = grab_screen_snapshot(screen)
+            if not snapshot.isNull():
+                rects = element_rects_for_screen(screen, native_rects)
+                screen_data.append((screen, snapshot, rects))
+
+        if not screen_data:
+            NotificationService.notify(APP_NAME, "Failed to capture screen for selection.")
+            self._restore_after_screenshot()
+            return
+
+        def on_selected(local_rect: QRect, screen, snapshot) -> None:
+            selected_rect = QRect(local_rect)
+            selected_screen = screen
+            selected_snapshot = snapshot
+            self._close_screenshot_selectors(restore=False)
+
+            def capture_after_overlay_closes() -> None:
+                pixmap = crop_screen_snapshot(
+                    selected_snapshot,
+                    selected_screen,
+                    selected_rect,
+                )
+                copied = self._copy_pixmap_to_clipboard(
+                    pixmap,
+                    "Failed to capture element.",
+                )
+                if copied and not selected_rect.isEmpty():
+                    self._store_last_capture_region(selected_screen, selected_rect)
+
+            QTimer.singleShot(20, capture_after_overlay_closes)
+
+        def on_cancelled() -> None:
+            self._close_screenshot_selectors(restore=True)
+
+        for screen, snapshot, rects in screen_data:
+            selector = ElementSelector(screen, snapshot, rects, on_selected, on_cancelled)
             self.selectors.append(selector)
             selector.show()
 

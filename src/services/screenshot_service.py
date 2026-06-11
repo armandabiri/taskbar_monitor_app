@@ -13,10 +13,13 @@ from PyQt6.QtCore import QObject, QPoint, QRect, QSize, QTimer, pyqtSignal
 from PyQt6.QtGui import QGuiApplication, QImage, QPainter, QPixmap, QScreen
 from PyQt6.QtWidgets import QApplication
 
+from services import uia_service
+
 LOGGER = logging.getLogger(__name__)
 
 _CAPTUREBLT = 0x40000000
 _SRCCOPY = 0x00CC0020
+_PW_RENDERFULLCONTENT = 0x00000002
 _DIB_RGB_COLORS = 0
 _BI_RGB = 0
 _GA_ROOT = 2
@@ -339,6 +342,62 @@ def native_rect_to_screen_local_rect(rect: wintypes.RECT) -> tuple[QScreen, QRec
     if local_rect.isEmpty():
         return None
     return (screen, local_rect)
+
+
+def element_rects_for_screen(
+    screen: QScreen,
+    native_rects: list[uia_service.ElementRect] | None = None,
+) -> list[tuple[QRect, str]]:
+    """Map UIA element rectangles onto one screen as (local logical rect, label).
+
+    Returns rectangles sorted largest-first so a hover hit-test can pick the
+    smallest element containing the cursor. Pass ``native_rects`` to reuse a
+    single tree walk across screens. Empty when UIA is unavailable.
+    """
+    if native_rects is None:
+        native_rects = uia_service.collect_element_rects()
+    if not native_rects:
+        return []
+
+    monitor = _native_monitor_for_screen(screen)
+    geom = screen.geometry()
+    screen_rect = QRect(QPoint(0, 0), geom.size())
+    if monitor is not None and monitor.width > 0 and monitor.height > 0:
+        scale_x = geom.width() / monitor.width
+        scale_y = geom.height() / monitor.height
+        origin_x, origin_y = monitor.left, monitor.top
+        bounds = (monitor.left, monitor.top, monitor.right, monitor.bottom)
+    else:
+        ratio = screen.devicePixelRatio() or 1.0
+        scale_x = scale_y = 1.0 / ratio
+        origin_x = round(geom.x() * ratio)
+        origin_y = round(geom.y() * ratio)
+        bounds = (
+            origin_x,
+            origin_y,
+            origin_x + round(geom.width() * ratio),
+            origin_y + round(geom.height() * ratio),
+        )
+
+    mapped: list[tuple[QRect, str]] = []
+    for native in native_rects:
+        center_x = (native.left + native.right) // 2
+        center_y = (native.top + native.bottom) // 2
+        if not (bounds[0] <= center_x < bounds[2] and bounds[1] <= center_y < bounds[3]):
+            continue
+        local = QRect(
+            round((native.left - origin_x) * scale_x),
+            round((native.top - origin_y) * scale_y),
+            max(1, round(native.width * scale_x)),
+            max(1, round(native.height * scale_y)),
+        ).intersected(screen_rect)
+        if local.width() < 4 or local.height() < 4:
+            continue
+        label = native.name or native.control_type
+        mapped.append((local, label))
+
+    mapped.sort(key=lambda item: item[0].width() * item[0].height(), reverse=True)
+    return mapped
 
 
 def hwnd_client_screen_local_rect(hwnd: int) -> tuple[QScreen, QRect] | None:
@@ -726,7 +785,12 @@ def grab_screen_region(screen: QScreen, local_rect: QRect) -> QPixmap:
         include_layered_windows=False,
     )
     if not image.isNull():
-        return QPixmap.fromImage(image)
+        pixmap = QPixmap.fromImage(image)
+        # A non-null but all-black grab means the compositor handed back an empty
+        # surface (common right after windows reorder); fall through to Qt's
+        # grabWindow rather than returning a blank strip into the stitch.
+        if not _pixmap_is_probably_blank(pixmap):
+            return pixmap
 
     geom = screen.geometry()
     rect = QRect(local_rect).normalized()
@@ -816,15 +880,122 @@ def _pixmap_is_probably_blank(pixmap: QPixmap) -> bool:
     return samples > 0 and (blank / samples) > 0.98
 
 
+def _print_window_image(hwnd: int) -> QImage:
+    """Render a window into a bitmap via PrintWindow, even when occluded.
+
+    Unlike a screen BitBlt, PrintWindow asks the window to paint itself, so it
+    works when the target is partially covered and never captures windows
+    stacked on top of it. PW_RENDERFULLCONTENT makes it work for DWM/Chromium/
+    Direct-composition windows that would otherwise come back black.
+    """
+    user32 = _get_user32()
+    gdi32 = _get_gdi32()
+    if user32 is None or gdi32 is None or not hwnd:
+        return QImage()
+
+    rect = wintypes.RECT()
+    try:
+        user32.GetWindowRect.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
+        user32.GetWindowRect.restype = wintypes.BOOL
+        if not user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+            return QImage()
+    except OSError:
+        return QImage()
+
+    width = int(rect.right - rect.left)
+    height = int(rect.bottom - rect.top)
+    if width <= 0 or height <= 0:
+        return QImage()
+
+    screen_dc = mem_dc = bitmap = old_obj = None
+    try:
+        user32.GetDC.restype = wintypes.HDC
+        user32.GetDC.argtypes = [wintypes.HWND]
+        user32.ReleaseDC.argtypes = [wintypes.HWND, wintypes.HDC]
+        user32.PrintWindow.argtypes = [wintypes.HWND, wintypes.HDC, wintypes.UINT]
+        user32.PrintWindow.restype = wintypes.BOOL
+        gdi32.CreateCompatibleDC.restype = wintypes.HDC
+        gdi32.CreateCompatibleDC.argtypes = [wintypes.HDC]
+        gdi32.CreateCompatibleBitmap.restype = wintypes.HBITMAP
+        gdi32.CreateCompatibleBitmap.argtypes = [wintypes.HDC, ctypes.c_int, ctypes.c_int]
+        gdi32.SelectObject.restype = wintypes.HGDIOBJ
+        gdi32.SelectObject.argtypes = [wintypes.HDC, wintypes.HGDIOBJ]
+
+        screen_dc = user32.GetDC(None)
+        if not screen_dc:
+            return QImage()
+        mem_dc = gdi32.CreateCompatibleDC(screen_dc)
+        bitmap = gdi32.CreateCompatibleBitmap(screen_dc, width, height)
+        if not mem_dc or not bitmap:
+            return QImage()
+        old_obj = gdi32.SelectObject(mem_dc, bitmap)
+
+        if not user32.PrintWindow(hwnd, mem_dc, _PW_RENDERFULLCONTENT):
+            return QImage()
+
+        bitmap_info = _BITMAPINFO()
+        bitmap_info.bmiHeader.biSize = ctypes.sizeof(_BITMAPINFOHEADER)
+        bitmap_info.bmiHeader.biWidth = width
+        bitmap_info.bmiHeader.biHeight = -height
+        bitmap_info.bmiHeader.biPlanes = 1
+        bitmap_info.bmiHeader.biBitCount = 32
+        bitmap_info.bmiHeader.biCompression = _BI_RGB
+
+        gdi32.GetDIBits.argtypes = [
+            wintypes.HDC,
+            wintypes.HBITMAP,
+            wintypes.UINT,
+            wintypes.UINT,
+            ctypes.c_void_p,
+            ctypes.POINTER(_BITMAPINFO),
+            wintypes.UINT,
+        ]
+        buffer = ctypes.create_string_buffer(width * height * 4)
+        rows = gdi32.GetDIBits(
+            mem_dc, bitmap, 0, height, buffer, ctypes.byref(bitmap_info), _DIB_RGB_COLORS
+        )
+        if rows != height:
+            return QImage()
+        return QImage(buffer, width, height, width * 4, QImage.Format.Format_RGB32).copy()
+    except (AttributeError, OSError) as exc:
+        LOGGER.debug("PrintWindow capture failed: %s", exc)
+        return QImage()
+    finally:
+        try:
+            if old_obj and mem_dc:
+                gdi32.SelectObject(mem_dc, old_obj)
+            if bitmap:
+                gdi32.DeleteObject(bitmap)
+            if mem_dc:
+                gdi32.DeleteDC(mem_dc)
+            if screen_dc:
+                user32.ReleaseDC(None, screen_dc)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            LOGGER.debug("PrintWindow cleanup failed: %s", exc)
+
+
 def grab_window_pixmap(hwnd: int) -> QPixmap:
-    """Capture a top-level window's visible bounds."""
+    """Capture a top-level window's visible bounds.
+
+    PrintWindow is tried first so the capture is clean even when the window is
+    partially covered; a plain screen BitBlt and Qt's grabWindow are fallbacks
+    for the windows PrintWindow renders black.
+    """
+    printed = _print_window_image(hwnd)
+    if not printed.isNull():
+        pixmap = QPixmap.fromImage(printed)
+        if not _pixmap_is_probably_blank(pixmap):
+            return pixmap
+
     rect = get_window_rect_dwm(hwnd)
     if rect is not None:
         width = int(rect.right - rect.left)
         height = int(rect.bottom - rect.top)
         image = _grab_native_rect(int(rect.left), int(rect.top), width, height)
         if not image.isNull():
-            return QPixmap.fromImage(image)
+            pixmap = QPixmap.fromImage(image)
+            if not _pixmap_is_probably_blank(pixmap):
+                return pixmap
 
     screen = QGuiApplication.primaryScreen()
     if screen is None:
@@ -1218,6 +1389,12 @@ class ScrollingScreenshotCoordinator(QObject):
         self._cursor_moved = False
         self._px_per_notch: float | None = None
         self._last_sent_notches = scroll_notches
+        # UIA ScrollPattern target: when present, scrolling is driven cursor-free
+        # and termination uses the exact scroll percent instead of image guesses.
+        self._uia_target: uia_service.UiaScrollTarget | None = None
+        # Fraction of a viewport kept as overlap between UIA steps so adjacent
+        # frames always share enough content to stitch reliably.
+        self._uia_overlap = 0.18
 
     def start(
         self,
@@ -1240,6 +1417,10 @@ class ScrollingScreenshotCoordinator(QObject):
         self.scroll_point_candidates = []
         self.scroll_method_index = 0
         self.scroll_method_locked = False
+        self._uia_target = None
+        user_provided_viewport = (
+            viewport_rect is not None and not QRect(viewport_rect).isEmpty()
+        )
 
         if not is_valid_capture_window(self.hwnd, self._own_capture_hwnd()):
             self.failed.emit("Selected window is invalid for scrolling screenshot.")
@@ -1261,6 +1442,10 @@ class ScrollingScreenshotCoordinator(QObject):
             self.viewport_screen,
             self.viewport_rect,
         )
+        # Ask UIA for the actual scrollable element under the target point. When
+        # found it both fixes "captures the whole window" (we crop to the real
+        # scroll container) and unlocks cursor-free, position-aware scrolling.
+        self._acquire_uia_target(user_provided_viewport)
         qt_global_center = screen_local_rect_center_to_global(
             self.viewport_screen,
             self.viewport_rect,
@@ -1274,7 +1459,9 @@ class ScrollingScreenshotCoordinator(QObject):
         self._cursor_moved = False
         # A real click is what activates Chromium/Electron panes so a synthetic
         # wheel is honored; without it those targets silently ignore scrolling.
-        self._activate_scroll_target(click=True)
+        # The UIA ScrollPattern path needs no click (and clicking would only add
+        # cursor jank), so suppress it when UIA is driving.
+        self._activate_scroll_target(click=self._uia_target is None)
         QApplication.processEvents()
 
         self.images = []
@@ -1292,6 +1479,41 @@ class ScrollingScreenshotCoordinator(QObject):
         except (AttributeError, ValueError):
             own_hwnd = 0
         return 0 if self.allow_self_capture else own_hwnd
+
+    def _acquire_uia_target(self, user_provided_viewport: bool) -> None:
+        """Resolve the UIA scrollable element under the target point, if any.
+
+        When the viewport was auto-derived (not drag-selected by the user), the
+        scrollable element's own bounds replace it so the capture frames the real
+        scroll container instead of the whole window and its chrome.
+        """
+        if not uia_service.is_available() or self.scroll_point_native is None:
+            return
+
+        target = uia_service.scroll_target_from_native_point(*self.scroll_point_native)
+        if target is None or not target.vertically_scrollable():
+            return
+        self._uia_target = target
+
+        if user_provided_viewport:
+            return
+        rect = target.bounding_rect
+        if rect is None:
+            return
+        mapped = native_rect_to_screen_local_rect(rect)
+        if mapped is None:
+            return
+        screen, local_rect = mapped
+        if local_rect.width() < 40 or local_rect.height() < 40:
+            return
+        self.viewport_screen = screen
+        self.viewport_rect = local_rect
+        self.scroll_point_native = screen_local_rect_center_to_native(screen, local_rect)
+        LOGGER.info(
+            "Scrolling capture using UIA scroll container viewport %sx%s.",
+            local_rect.width(),
+            local_rect.height(),
+        )
 
     def _grab_frame(self) -> QImage | None:
         if self.viewport_screen is not None and not self.viewport_rect.isEmpty():
@@ -1396,11 +1618,13 @@ class ScrollingScreenshotCoordinator(QObject):
             return
 
         expected_offset = None
-        if self._px_per_notch is not None and self._last_sent_notches > 0:
-            expected_offset = max(1, round(self._px_per_notch * self._last_sent_notches))
-        elif self.offsets:
+        if self.offsets:
             sorted_offsets = sorted(self.offsets)
             expected_offset = sorted_offsets[len(sorted_offsets) // 2]
+        elif not self._is_uia_method() and (
+            self._px_per_notch is not None and self._last_sent_notches > 0
+        ):
+            expected_offset = max(1, round(self._px_per_notch * self._last_sent_notches))
         offset = find_vertical_offset(self.images[-1], new_img, expected_offset)
         if offset is None:
             LOGGER.warning("Stitching alignment failed. Finishing.")
@@ -1409,11 +1633,12 @@ class ScrollingScreenshotCoordinator(QObject):
 
         self.images.append(new_img)
         self.offsets.append(offset)
-        per_notch = offset / max(1, self._last_sent_notches)
-        if self._px_per_notch is None:
-            self._px_per_notch = per_notch
-        else:
-            self._px_per_notch = (self._px_per_notch + per_notch) / 2.0
+        if not self._is_uia_method():
+            per_notch = offset / max(1, self._last_sent_notches)
+            if self._px_per_notch is None:
+                self._px_per_notch = per_notch
+            else:
+                self._px_per_notch = (self._px_per_notch + per_notch) / 2.0
 
         if len(self.images) >= self.max_pages:
             LOGGER.info("Reached maximum page limit.")
@@ -1423,6 +1648,19 @@ class ScrollingScreenshotCoordinator(QObject):
         self._scroll_and_continue()
 
     def _scroll_and_continue(self) -> None:
+        # UIA ScrollPattern path: cursor-free, and it knows exactly when the
+        # content is at the bottom, so no activation click or stride math.
+        if self._is_uia_method():
+            if self._uia_target is not None and self._uia_target.at_bottom():
+                LOGGER.info("UIA reports scroll position at bottom. Finishing.")
+                self._finish()
+                return
+            if not self._send_scroll():
+                self._finish()
+                return
+            self.timer.start(self.scroll_delay_ms)
+            return
+
         self._activate_scroll_target()
         notches = _stride_notches(
             self.last_size.height() if not self.last_size.isEmpty() else 0,
@@ -1439,11 +1677,15 @@ class ScrollingScreenshotCoordinator(QObject):
     def _build_scroll_plan(self) -> list[tuple[str, tuple[int, int]]]:
         """Ordered list of (method, native-point) scroll attempts.
 
-        PostMessage to the control is tried first (cheap, doesn't move the
-        cursor) unless input injection is forced, then SendInput wheel at each
-        coordinate candidate. Probing walks this list until one moves content.
+        The UIA ScrollPattern (when the target exposes one) is tried first: it
+        scrolls without moving the cursor and reports exact position. PostMessage
+        to the control is next (cheap, no cursor move) unless input injection is
+        forced, then SendInput wheel at each coordinate candidate. Probing walks
+        this list until one moves content.
         """
         plan: list[tuple[str, tuple[int, int]]] = []
+        if self._uia_target is not None and self.scroll_point_native is not None:
+            plan.append(("uia", self.scroll_point_native))
         if (
             not self.prefer_input_injection
             and self.scroll_hwnd
@@ -1453,6 +1695,30 @@ class ScrollingScreenshotCoordinator(QObject):
         for point in self.scroll_point_candidates:
             plan.append(("input", point))
         return plan
+
+    def _is_uia_method(self) -> bool:
+        entry = self._current_plan_entry()
+        return entry is not None and entry[0] == "uia" and self._uia_target is not None
+
+    def _uia_step_down(self) -> bool:
+        """Advance the UIA scroll target down by nearly one viewport.
+
+        Steps by a fraction of the view size so adjacent frames keep enough
+        overlap to stitch, and clamps to 100% so the last partial page is still
+        captured. Returns False when the content can advance no further.
+        """
+        target = self._uia_target
+        if target is None:
+            return False
+        percent = target.vertical_percent()
+        view = target.vertical_view_size()
+        if percent is None or view is None:
+            return target.scroll_down_increment()
+        step = max(1.0, view * (1.0 - self._uia_overlap))
+        next_percent = min(100.0, percent + step)
+        if next_percent <= percent + 0.01:
+            return False
+        return target.set_vertical_percent(next_percent)
 
     def _current_plan_entry(self) -> tuple[str, tuple[int, int]] | None:
         if not self.scroll_plan:
@@ -1480,6 +1746,10 @@ class ScrollingScreenshotCoordinator(QObject):
         if entry is None:
             return False
         kind, (x, y) = entry
+        if kind == "uia" and self._uia_target is not None:
+            if upward:
+                return self._uia_target.scroll_to_top()
+            return self._uia_step_down()
         if kind == "post":
             return _post_wheel_scroll(self.scroll_hwnd, x, y, notches=count, upward=upward)
         self._cursor_moved = True
@@ -1499,6 +1769,10 @@ class ScrollingScreenshotCoordinator(QObject):
 
     def _activate_scroll_target(self, *, click: bool = False) -> None:
         _force_foreground(self.hwnd)
+        # The UIA path drives ScrollPattern directly, so it needs neither a
+        # focus-stealing child focus nor an activation click (both add jank).
+        if self._is_uia_method() and not click:
+            return
         if self.scroll_hwnd:
             _focus_child_window(self.scroll_hwnd)
         point = self._scroll_point_for_method()
@@ -1563,6 +1837,7 @@ class ScrollingScreenshotCoordinator(QObject):
                 "px_per_notch": self._px_per_notch,
                 "scroll_method_index": self.scroll_method_index,
                 "scroll_method_locked": self.scroll_method_locked,
+                "uia_scroll": self._uia_target is not None,
                 "scroll_hwnd": self.scroll_hwnd,
                 "capture_hwnd": self.hwnd,
                 "viewport_rect": [

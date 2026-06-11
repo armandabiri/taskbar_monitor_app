@@ -18,8 +18,16 @@ a = Analysis(
         'ui.snapshot_live_cleanup_dialog',
         'services.resource_control.history',
         'services.resource_control.snapshot_scope',
+        'services.uia_service',
         'sounddevice',
         'lameenc',
+        # UI Automation for smart element/scroll capture. The UIAutomationClient
+        # wrapper is generated in-memory at runtime (gen_dir=None when frozen),
+        # so only comtypes itself needs to be bundled.
+        'comtypes',
+        'comtypes.client',
+        'comtypes.client._generate',
+        'comtypes.stream',
     ],
     hookspath=[],
     hooksconfig={},

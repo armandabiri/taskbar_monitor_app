@@ -107,6 +107,7 @@ class ShortcutService:
         )
         # Screenshot hotkeys
         self._try_register("windows+shift+r", lambda: monitor.request_capture_regional.emit())
+        self._try_register("windows+shift+e", lambda: monitor.request_capture_element.emit())
         self._try_register("windows+shift+w", lambda: monitor.request_capture_active.emit())
         self._try_register("windows+shift+s", lambda: monitor.request_capture_scrolling.emit())
         self._try_register(

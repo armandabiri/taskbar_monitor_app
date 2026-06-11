@@ -5,3 +5,4 @@ types-psutil
 keyboard
 sounddevice
 lameenc
+comtypes
