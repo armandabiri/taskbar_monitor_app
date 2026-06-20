@@ -38,6 +38,12 @@ The active backend appears at startup in the log:
 `sensors: active backend=<id> cpu=<bool> ram=<bool> gpu=<bool> ssd=<bool>`, and live
 in **Sensor Diagnostics…**.
 
+## Temperature unit
+
+`sensors/temp_unit` (`C` default, or `F`), set in **Monitor Settings…**, controls
+the on-scope display unit. Readings are stored and compared internally in Celsius
+(so thresholds stay in °C); only the displayed labels convert to °F.
+
 ## Thresholds and alerts
 
 Per-sensor Celsius thresholds (defaults): CPU 95, RAM 70, GPU 90, SSD 80. When a

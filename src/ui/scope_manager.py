@@ -46,8 +46,13 @@ def format_speed(bytes_per_second: float) -> str:
     return f"{bytes_per_second / KB:.0f}K"
 
 
-def _celsius(value: float | None) -> str:
-    return f"{int(round(value))}°C" if value is not None else "N/A"
+def format_temp(value: float | None, unit: str) -> str:
+    """Format a Celsius reading in the chosen display unit (``"C"`` or ``"F"``)."""
+    if value is None:
+        return "N/A"
+    if unit == "F":
+        return f"{int(round(value * 9 / 5 + 32))}°F"
+    return f"{int(round(value))}°C"
 
 
 class ScopeManager:
@@ -63,6 +68,7 @@ class ScopeManager:
         self.cpu_grid: CPUBarWidget | None = None
         self._alerts = ThermalAlerts(notify)
         self._telemetry: TelemetryLog | None = None
+        self._unit = "C"
         self.reload()
 
     # -- construction ---------------------------------------------------
@@ -122,20 +128,19 @@ class ScopeManager:
             )
         if "gputemp" in self.scopes:
             g = reading.gpu_temp_c
-            self.scopes["gputemp"].update_value(g if g is not None else 0.0, _celsius(g),
-                                                auto_scale=True)
+            self.scopes["gputemp"].update_value(g if g is not None else 0.0,
+                                                format_temp(g, self._unit), auto_scale=True)
         if "ssdtemp" in self.scopes:
             s = reading.ssd_temp_c
-            self.scopes["ssdtemp"].update_value(s if s is not None else 0.0, _celsius(s),
-                                                auto_scale=True)
+            self.scopes["ssdtemp"].update_value(s if s is not None else 0.0,
+                                                format_temp(s, self._unit), auto_scale=True)
 
-    @staticmethod
-    def _temp_text(cpu_t: float | None, ram_t: float | None) -> str:
+    def _temp_text(self, cpu_t: float | None, ram_t: float | None) -> str:
         parts = []
         if cpu_t is not None:
-            parts.append(f"CPU {int(round(cpu_t))}°C")
+            parts.append(f"CPU {format_temp(cpu_t, self._unit)}")
         if ram_t is not None:
-            parts.append(f"RAM {int(round(ram_t))}°C")
+            parts.append(f"RAM {format_temp(ram_t, self._unit)}")
         return "  ".join(parts) if parts else "N/A"
 
     # -- alerts & telemetry --------------------------------------------
@@ -167,7 +172,9 @@ class ScopeManager:
 
     # -- settings & layout ---------------------------------------------
     def reload(self) -> None:
-        """Re-read telemetry settings and rebuild the telemetry sink."""
+        """Re-read display unit + telemetry settings and rebuild the telemetry sink."""
+        unit = str(self._settings.value("sensors/temp_unit", "C")).upper()
+        self._unit = "F" if unit.startswith("F") else "C"
         if read_setting_int(self._settings, "telemetry/enabled", 0):
             fmt = str(self._settings.value("telemetry/format", "csv"))
             retention = read_setting_int(self._settings, "telemetry/retention_rows", 50000)

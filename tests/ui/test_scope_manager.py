@@ -45,6 +45,16 @@ def test_update_renders_celsius(manager):
     assert "CPU 55°C" in manager.scopes["temp"].display_text
 
 
+def test_fahrenheit_unit_setting(manager):
+    manager._settings.setValue("sensors/temp_unit", "F")
+    manager.reload()
+    reading = SensorReading(cpu_temp_c=55.0, ram_temp_c=40.0, ssd_temp_c=45.0)
+    manager.update([5.0], 5.0, 30.0, 0.0, 0.0, 0.0, _gpu(), reading)
+    # 45 °C == 113 °F; 55 °C == 131 °F
+    assert manager.scopes["ssdtemp"].display_text == "113°F"
+    assert "CPU 131°F" in manager.scopes["temp"].display_text
+
+
 def test_ssd_threshold_breach_fires_one_alert_and_flags_scope(manager):
     hot = SensorReading(ssd_temp_c=85.0)
     # debounce is 5s; force immediate firing by resetting debounce

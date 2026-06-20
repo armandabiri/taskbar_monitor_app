@@ -26,6 +26,7 @@ from core.config import read_setting_int
 
 _SOURCES = ("auto", "clr", "http")
 _FORMATS = ("csv", "jsonl")
+_UNITS = (("Celsius (°C)", "C"), ("Fahrenheit (°F)", "F"))
 _THRESHOLDS = (
     ("sensors/threshold_cpu_c", "CPU alert (°C)", 95),
     ("sensors/threshold_ram_c", "RAM alert (°C)", 70),
@@ -51,6 +52,13 @@ class MonitorSettingsDialog(QDialog):
         src_index = _SOURCES.index(current_source) if current_source in _SOURCES else 0
         self._source.setCurrentIndex(src_index)
         form.addRow(QLabel("Sensor source"), self._source)
+
+        self._unit = QComboBox()
+        self._unit.addItems([label for label, _code in _UNITS])
+        current_unit = str(settings.value("sensors/temp_unit", "C")).upper()
+        unit_codes = [code for _label, code in _UNITS]
+        self._unit.setCurrentIndex(unit_codes.index("F") if current_unit.startswith("F") else 0)
+        form.addRow(QLabel("Temperature unit"), self._unit)
 
         self._alerts = QCheckBox("Enable thermal alerts")
         self._alerts.setChecked(bool(read_setting_int(settings, "sensors/alerts_enabled", 1)))
@@ -84,6 +92,7 @@ class MonitorSettingsDialog(QDialog):
     def _apply(self) -> None:
         """Persist all fields, fire on_apply, and accept the dialog."""
         self._settings.setValue("sensors/source", self._source.currentText())
+        self._settings.setValue("sensors/temp_unit", _UNITS[self._unit.currentIndex()][1])
         self._settings.setValue("sensors/alerts_enabled", 1 if self._alerts.isChecked() else 0)
         for key, spin in self._threshold_spins.items():
             self._settings.setValue(key, spin.value())

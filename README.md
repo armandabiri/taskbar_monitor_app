@@ -107,11 +107,13 @@ Taskbar Monitor reads CPU, RAM, GPU, and SSD/NVMe temperatures **in-process** fr
 an embedded copy of the open-source `LibreHardwareMonitorLib.dll` (MPL-2.0) via
 [pythonnet](https://pythonnet.github.io/). No separate sensor app needs to run.
 
-- Temperatures display in Celsius on three scopes: **Temp (CPU/RAM)**, **GPU Temp**,
-  and **SSD Temp**. Toggle any of them from the right-click **Graphs** submenu.
+- Temperatures show on three scopes: **Temp (CPU/RAM)**, **GPU Temp**, and **SSD
+  Temp**, in your chosen unit (°C or °F). Toggle any of them from the right-click
+  **Graphs** submenu.
 - **Monitor Settings…** (right-click menu) sets the sensor source (`auto` / `clr` /
-  `http`), per-sensor alert thresholds (SSD defaults to 80 °C — the Crucial T700
-  throttle point), thermal-alert toggling, and telemetry logging.
+  `http`), the **temperature unit (°C / °F)**, per-sensor alert thresholds (SSD
+  defaults to 80 °C — the Crucial T700 throttle point), thermal-alert toggling, and
+  telemetry logging.
 - **Sensor Diagnostics…** shows the active backend and per-sensor availability so you
   can tell whether (and why) a reading is `N/A`.
 - Backends are tried in order: embedded CLR → LibreHardwareMonitor HTTP
