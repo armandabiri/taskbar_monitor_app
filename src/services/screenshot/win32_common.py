@@ -21,6 +21,10 @@ _MOUSEEVENTF_LEFTDOWN = 0x0002
 _MOUSEEVENTF_LEFTUP = 0x0004
 _WHEEL_DELTA = 120
 _INPUT_MOUSE = 0
+_INPUT_KEYBOARD = 1
+_KEYEVENTF_KEYUP = 0x0002
+_VK_CONTROL = 0x11
+_VK_V = 0x56
 _ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
 
@@ -71,8 +75,18 @@ class _MOUSEINPUT(ctypes.Structure):
     ]
 
 
+class _KEYBDINPUT(ctypes.Structure):
+    _fields_ = [
+        ("wVk", wintypes.WORD),
+        ("wScan", wintypes.WORD),
+        ("dwFlags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", _ULONG_PTR),
+    ]
+
+
 class _InputUnion(ctypes.Union):
-    _fields_ = [("mi", _MOUSEINPUT)]
+    _fields_ = [("mi", _MOUSEINPUT), ("ki", _KEYBDINPUT)]
 
 
 class _INPUT(ctypes.Structure):

@@ -11,6 +11,9 @@ a = Analysis(
     datas=[
         ('src/assets/taskbar-monitor.svg', 'assets'),
         ('src/assets/taskbar-monitor.ico', 'assets'),
+        # Embedded open-source sensor backend (fetched by scripts/fetch_sensor_dll.py
+        # before the build) so CPU/RAM/GPU/SSD temperatures work with no external tool.
+        ('src/assets/sensors/LibreHardwareMonitorLib.dll', 'assets/sensors'),
     ] + sounddevice_datas,
     hiddenimports=[
         'ui.cleanup_history_dialog',
@@ -32,6 +35,7 @@ a = Analysis(
         'services.uia_service',
         'ui.capture_controller',
         'ui.capture_selectors',
+        'ui.capture_collection',
         'ui.capture_delay_overlay',
         'ui.capture_toolbar',
         'ui.pinned_capture_overlay',
@@ -43,9 +47,14 @@ a = Analysis(
         'services.screenshot.win32_capture',
         'services.screenshot.scroll_coordinator',
         'services.screenshot.output_pipeline',
+        'services.screenshot.key_input',
         'services.uia_scroll_targets',
         'sounddevice',
         'lameenc',
+        # Embedded sensor backend: pythonnet provides the CLR bridge used to load
+        # LibreHardwareMonitorLib.dll in-process for CPU/RAM/GPU/SSD temperatures.
+        'clr_loader',
+        'pythonnet',
         # UI Automation for smart element/scroll capture. The UIAutomationClient
         # wrapper is generated in-memory at runtime (gen_dir=None when frozen),
         # so only comtypes itself needs to be bundled.

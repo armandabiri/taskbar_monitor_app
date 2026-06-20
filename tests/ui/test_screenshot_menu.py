@@ -35,6 +35,12 @@ class _FakeMonitor:
     def pin_last_capture(self) -> None:
         self.calls.append("pin")
 
+    def toggle_capture_collection(self) -> None:
+        self.calls.append("collect")
+
+    def paste_capture_collection(self) -> None:
+        self.calls.append("paste")
+
     def toggle_capture_toolbar(self) -> None:
         self.calls.append("toolbar")
 
@@ -70,6 +76,8 @@ def test_screenshot_submenu_builds_all_modes(qtbot) -> None:
         "active_window",
         "scrolling",
         "pin",
+        "collect",
+        "paste",
         "toolbar",
         "settings",
     ]

@@ -19,6 +19,7 @@ dependencies = [
     "keyboard",
     "sounddevice",
     "lameenc",
+    "pythonnet",
 ]
 
 [project.optional-dependencies]

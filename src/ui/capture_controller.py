@@ -22,6 +22,12 @@ from services.screenshot_service import (
     is_valid_capture_window,
 )
 from services.screenshot_settings import load_screenshot_settings, scroll_debug_dir
+from ui.capture_collection import (
+    CaptureCollection,
+    CaptureCollectionMixin,
+    CollectionBadge,
+    SequentialImagePaster,
+)
 from ui.capture_delay_overlay import run_with_delay
 from ui.capture_selectors import CaptureSelectorsMixin
 from ui.scroll_capture_progress import ScrollCaptureProgress
@@ -29,7 +35,7 @@ from ui.scroll_capture_progress import ScrollCaptureProgress
 LOGGER = logging.getLogger(__name__)
 
 
-class CaptureController(CaptureSelectorsMixin):
+class CaptureController(CaptureSelectorsMixin, CaptureCollectionMixin):
     """Owns screenshot mode entry, scroll coordinator, and output routing."""
 
     def __init__(self, monitor) -> None:
@@ -49,6 +55,11 @@ class CaptureController(CaptureSelectorsMixin):
         self._last_image: QImage | None = None
         self._pinned: list = []
         self._delay_overlay = None
+        self._collection = CaptureCollection(monitor)
+        self._collection_badge = CollectionBadge(monitor)
+        self._collection_badge.bind(self._collection, monitor)
+        self._paster = SequentialImagePaster(monitor)
+        self._paster.finished.connect(self._on_paste_finished)
 
     def reload_scroll_settings(self) -> None:
         """Apply screenshot settings to the scroll coordinator."""
@@ -140,7 +151,8 @@ class CaptureController(CaptureSelectorsMixin):
                 NotificationService.notify(APP_NAME, failure_message)
                 return False
             settings = load_screenshot_settings(self._monitor.settings)
-            if not settings.copy_enabled and not settings.save_enabled:
+            collecting = self._collection.active
+            if not settings.copy_enabled and not settings.save_enabled and not collecting:
                 NotificationService.notify(
                     APP_NAME,
                     "Enable clipboard and/or file save in Screenshot Settings.",
@@ -149,10 +161,14 @@ class CaptureController(CaptureSelectorsMixin):
             final = self._finalize_image(image)
             if final is None or final.isNull():
                 return False
-            ok, saved_path = deliver_capture(self._monitor.clipboard, final, settings)
             self._last_image = QImage(final)
-            if saved_path is not None:
-                LOGGER.info("Screenshot saved to %s", saved_path)
+            if collecting:
+                self._collection.add(final)
+            ok = True
+            if settings.copy_enabled or settings.save_enabled:
+                ok, saved_path = deliver_capture(self._monitor.clipboard, final, settings)
+                if saved_path is not None:
+                    LOGGER.info("Screenshot saved to %s", saved_path)
             return ok
         finally:
             self._restore_after_screenshot()

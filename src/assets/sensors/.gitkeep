@@ -1,0 +1,2 @@
+# LibreHardwareMonitorLib.dll is fetched here by scripts/fetch_sensor_dll.py and
+# bundled into the PyInstaller dist. The DLL itself is not committed.

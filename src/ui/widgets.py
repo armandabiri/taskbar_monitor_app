@@ -1,37 +1,37 @@
 """Resource monitoring widgets (CPU grid and oscilloscope scopes)."""
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QPoint, Qt
 from PyQt6.QtGui import (
     QColor,
     QFont,
+    QMouseEvent,
     QPainter,
     QPainterPath,
+    QPaintEvent,
     QPen,
     QPixmap,
-    QPaintEvent,
     QResizeEvent,
 )
-from PyQt6.QtCore import QPoint
-from PyQt6.QtGui import QMouseEvent
 from PyQt6.QtWidgets import QWidget
+
 from core.config import (
     CPU_CELL_SIZE,
     CPU_CELL_SPACING,
     CPU_GRID_ROWS,
+    MIN_AUTOSCALE,
     PERCENT_MAX,
-    SCOPE_MIN_WIDTH,
-    SCOPE_MIN_HEIGHT,
-    SCOPE_HISTORY_SIZE,
-    SCOPE_POINT_STEP,
     SCOPE_BOTTOM_PADDING,
-    SCOPE_VERTICAL_PADDING,
     SCOPE_GRID_X_STEP,
     SCOPE_GRID_Y_STEP,
-    SCOPE_LINE_WIDTH,
+    SCOPE_HISTORY_SIZE,
     SCOPE_LABEL_FONT,
     SCOPE_LABEL_FONT_SIZE,
+    SCOPE_LINE_WIDTH,
+    SCOPE_MIN_HEIGHT,
+    SCOPE_MIN_WIDTH,
+    SCOPE_POINT_STEP,
     SCOPE_TEXT_SHADOW_ALPHA,
-    MIN_AUTOSCALE,
+    SCOPE_VERTICAL_PADDING,
 )
 from core.theme import ThemeEngine
 
@@ -153,8 +153,11 @@ class ScopeWidget(QWidget):
         self.cached_path = QPainterPath()
         self.cached_secondary_path = QPainterPath()
         self.grid_pixmap: QPixmap | None = None
-        self.sec_min = 110.0
-        self.sec_max = 150.0
+        self.sec_min = 30.0
+        self.sec_max = 90.0
+        # Set True by the scope manager when this metric is over its thermal
+        # threshold; the primary trace is then drawn in the alert color.
+        self.alert = False
 
     def update_value(self, value: float, text: str, auto_scale: bool = False, top_right_text: str = "", secondary_value: float | None = None) -> None:
         """Append a sample and rebuild the plotted path."""
@@ -171,11 +174,11 @@ class ScopeWidget(QWidget):
         height = self.height()
         path = QPainterPath()
         secondary_path = QPainterPath()
-        
+
         num_samples = min(len(self.history), width // SCOPE_POINT_STEP)
         visible = self.history[-num_samples:]
         visible_sec = self.secondary_history[-num_samples:]
-        
+
         sec_started = False
         for index, sample in enumerate(visible):
             x_pos = width - (len(visible) - index) * SCOPE_POINT_STEP
@@ -186,7 +189,7 @@ class ScopeWidget(QWidget):
                 path.moveTo(x_pos, y_pos)
             else:
                 path.lineTo(x_pos, y_pos)
-                
+
             sec_sample = visible_sec[index]
             if sec_sample is not None:
                 # Map temperature to the Y axis dynamically based on sec_min/sec_max
@@ -234,22 +237,25 @@ class ScopeWidget(QWidget):
         painter.drawPixmap(0, 0, self.grid_pixmap)
 
         # Primary signal
-        if self.label in ("CPU", "RAM"):
+        if self.alert:
+            line_color = QColor("#ff5555")
+        elif self.label in ("CPU", "RAM"):
             line_color = ThemeEngine.get_dynamic_color(self.history[-1])
         else:
             line_color = QColor(self.color)
         painter.setPen(QPen(line_color, SCOPE_LINE_WIDTH))
         painter.drawPath(self.cached_path)
-        
-        # Secondary signal (temperature)
+
+        # Secondary signal (temperature, Celsius). Ramp blue (cool) to red (hot)
+        # across roughly 40-85 °C.
         last_sec = self.secondary_history[-1]
         if last_sec is not None:
-            ratio = max(0.0, min(1.0, (last_sec - 110.0) / 40.0))
+            ratio = max(0.0, min(1.0, (last_sec - 40.0) / 45.0))
             r = int(77 + (255 - 77) * ratio)
             g = int(184 + (118 - 184) * ratio)
             b = int(255 + (117 - 255) * ratio)
             sec_color = QColor(r, g, b)
-            
+
             pen = QPen(sec_color, 2)
             pen.setStyle(Qt.PenStyle.DashLine)
             painter.setPen(pen)

@@ -27,6 +27,15 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
+# 3b. Fetch and verify the embedded sensor DLL so the bundle is self-contained
+Write-Host "[3b/5] Fetching embedded sensor DLL (LibreHardwareMonitorLib)..." -ForegroundColor Yellow
+python scripts/fetch_sensor_dll.py --download
+python scripts/fetch_sensor_dll.py --verify
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "[!] Sensor DLL fetch/verify failed." -ForegroundColor Red
+    exit 1
+}
+
 # 4. Clean previous isolated builds
 if (Test-Path $distPath) { Remove-Item -Recurse -Force $distPath }
 if (Test-Path $workPath) { Remove-Item -Recurse -Force $workPath }

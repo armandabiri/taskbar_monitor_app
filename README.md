@@ -4,7 +4,8 @@ Taskbar Monitor is a Windows 11 desktop utility built with PyQt6. It combines a 
 
 ## Features
 
-- Live CPU, RAM, network, disk, GPU, VRAM, temperature, battery, and timer widgets.
+- Live CPU, RAM, network, disk, GPU, VRAM, battery, and timer widgets, plus
+  dedicated CPU/RAM, GPU, and SSD/NVMe **temperature** oscilloscopes (°C).
 - One-click microphone recording to MP3 with shared input access.
 - Recording settings from the app menu: save folder, filename prefix, bitrate, sample rate, channel mode, and optional auto-open folder after save.
 - Profile-driven cleanup modes for trim, throttle, and optional kill actions.
@@ -61,6 +62,12 @@ Post-capture and output:
 - **Pin to screen** — pin the last capture as an always-on-top overlay (drag to move,
   right-click for opacity/copy/close, `Esc` to dismiss).
 - **Delay** — set a 1–10 s countdown before a capture runs (useful for menus and tooltips).
+- **Capture collection (multi-image clipboard)** — press **Shift+Win+M** to start a
+  collection session; every capture you take while it is active is appended to a stack (a
+  badge shows the running count). Press **Shift+Win+M** again to stop. Then focus any app
+  that accepts pasted images and press **Shift+Win+V** to paste the whole stack one image
+  after another (each is placed on the clipboard and pasted with `Ctrl+V` in order); the
+  stack is cleared afterward.
 
 Settings live in **Screenshot Settings…** (QSettings under the `screenshot/` group): save
 folder, file format (PNG/JPEG), copy-to-clipboard, save-to-disk, capture delay, auto-open
@@ -80,6 +87,8 @@ Global shortcuts are registered when possible (a failed registration is logged o
 | Active window | Shift+Win+W |
 | Scrolling capture | Shift+Win+S |
 | Pin last capture | Shift+Win+P |
+| Start/stop capture collection | Shift+Win+M |
+| Paste collected captures | Shift+Win+V |
 
 ### Scrolling capture troubleshooting
 
@@ -91,6 +100,29 @@ Global shortcuts are registered when possible (a failed registration is logged o
   want; the app prefers the smallest scrollable container under the click.
 - To diagnose a bad stitch, enable **Write scroll debug frames** (off by default) — raw
   frames, the stitched result, and metrics are written to `.intelag/reports/scroll_live`.
+
+## Hardware sensors
+
+Taskbar Monitor reads CPU, RAM, GPU, and SSD/NVMe temperatures **in-process** from
+an embedded copy of the open-source `LibreHardwareMonitorLib.dll` (MPL-2.0) via
+[pythonnet](https://pythonnet.github.io/). No separate sensor app needs to run.
+
+- Temperatures display in Celsius on three scopes: **Temp (CPU/RAM)**, **GPU Temp**,
+  and **SSD Temp**. Toggle any of them from the right-click **Graphs** submenu.
+- **Monitor Settings…** (right-click menu) sets the sensor source (`auto` / `clr` /
+  `http`), per-sensor alert thresholds (SSD defaults to 80 °C — the Crucial T700
+  throttle point), thermal-alert toggling, and telemetry logging.
+- **Sensor Diagnostics…** shows the active backend and per-sensor availability so you
+  can tell whether (and why) a reading is `N/A`.
+- Backends are tried in order: embedded CLR → LibreHardwareMonitor HTTP
+  (`127.0.0.1:8085`) → NVML → PDH. If the embedded DLL or the .NET runtime is
+  missing, the app falls back automatically and logs the reason.
+- Full coverage (especially SSD/NVMe temperature) may require running the app as
+  administrator.
+
+The DLL is fetched and checksum-verified at build time and bundled into the
+executable. See [docs/sensors_runbook.md](docs/sensors_runbook.md) for the sensor
+source, thresholds, telemetry export, and DLL-refresh workflow.
 
 ## Runtime Files
 

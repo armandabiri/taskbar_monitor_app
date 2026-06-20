@@ -32,9 +32,6 @@ from PyQt6.QtWidgets import (
 from core.config import (
     APP_NAME,
     APP_ORG,
-    COLOR_GPU,
-    COLOR_TEMP,
-    COLOR_VRAM,
     CPU_WARMUP_INTERVAL_SECONDS,
     DEFAULT_AUTOHIDE_FULLSCREEN,
     DEFAULT_BG_OPACITY,
@@ -47,8 +44,6 @@ from core.config import (
     DEFAULT_SCREEN_PAD,
     DEFAULT_WIDTH,
     EDGE_MARGIN,
-    KB,
-    MB,
     MIN_WIDGET_HEIGHT,
     MIN_WIDGET_WIDTH,
     read_setting_int,
@@ -76,13 +71,12 @@ from services.resource_manager import (
     load_active_aggressive_profile,
     load_active_smart_profile,
 )
+from services.sensors import get_hub
 from services.shortcut_service import ShortcutService
 from services.system_info import (
     foreground_is_fullscreen,
     get_battery,
-    get_cpu_temp,
     get_gpu_stats,
-    get_ram_temp,
     start_background_pollers,
     stop_background_pollers,
 )
@@ -96,10 +90,11 @@ from ui.cmdline_kill_dialog import open_cmdline_kill_dialog
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.recording_settings_dialog import open_recording_settings_dialog
+from ui.scope_manager import ScopeManager
 from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
-from ui.widgets import CPUBarWidget, DragHandle, ScopeWidget
+from ui.widgets import DragHandle
 
 # Layout density presets — (margin_h, margin_v, spacing, scope_min_width, btn_size)
 LAYOUT_PRESETS: dict[str, tuple[int, int, int, int, int]] = {
@@ -185,6 +180,8 @@ class TaskbarMonitor(QWidget):
     request_capture_full_screen = pyqtSignal()
     request_capture_full_desktop = pyqtSignal()
     request_pin_capture = pyqtSignal()
+    request_toggle_collection = pyqtSignal()
+    request_paste_collection = pyqtSignal()
 
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
@@ -208,6 +205,8 @@ class TaskbarMonitor(QWidget):
         self.request_capture_full_screen.connect(self.capture_full_screen)
         self.request_capture_full_desktop.connect(self.capture_full_desktop)
         self.request_pin_capture.connect(self.pin_last_capture)
+        self.request_toggle_collection.connect(self.toggle_capture_collection)
+        self.request_paste_collection.connect(self.paste_capture_collection)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -595,26 +594,16 @@ class TaskbarMonitor(QWidget):
         self.mic_btn.clicked.connect(self._toggle_microphone_recording)
         self.main_layout.addWidget(self.mic_btn)
 
-        self.cpu_grid = CPUBarWidget()
-        self.main_layout.addWidget(self.cpu_grid)
-
-        self.scopes: dict[str, ScopeWidget] = {
-            "cpu": ScopeWidget("CPU", "#4db8ff"),
-            "ram": ScopeWidget("RAM", "#a29bfe"),
-            "up": ScopeWidget("UP", "#ff7675"),
-            "dn": ScopeWidget("DN", "#55efc4"),
-            "r/w": ScopeWidget("R/W", "#fdcb6e"),
-        }
-        if self._gpu_available:
-            self.scopes["gpu"] = ScopeWidget("GPU", COLOR_GPU)
-            self.scopes["vram"] = ScopeWidget("VRAM", COLOR_VRAM)
-        if self._temp_available:
-            self.scopes["temp"] = ScopeWidget("TEMP", COLOR_TEMP)
-            self.scopes["temp"].sec_min = 110.0
-            self.scopes["temp"].sec_max = 180.0
-
-        for scope in self.scopes.values():
-            self.main_layout.addWidget(scope, 1)
+        # CPU core grid + oscilloscope scopes (incl. GPU/SSD temperature) are
+        # owned by ScopeManager, which also drives thermal alerts and telemetry.
+        self.scope_manager = ScopeManager(
+            self.main_layout,
+            self.settings,
+            self._gpu_available,
+            self._temp_available,
+            lambda title, msg: NotificationService.notify(title, msg),
+        )
+        self.cpu_grid = self.scope_manager.build()
 
         # Battery (only shown when a battery is present)
         self.battery_widget = BatteryWidget(self)
@@ -629,7 +618,6 @@ class TaskbarMonitor(QWidget):
         self.countdown_timer.setFixedWidth(72)
         self.main_layout.addWidget(self.countdown_timer)
 
-        self._apply_scope_visibility()
         self._apply_layout_mode(self.get_layout_mode())
 
     # ------------------------------------------------------------------
@@ -637,17 +625,11 @@ class TaskbarMonitor(QWidget):
     # ------------------------------------------------------------------
     def is_scope_visible(self, key: str) -> bool:
         """Return whether the given scope is currently shown (default True)."""
-        return bool(read_setting_int(self.settings, f"scope_visible_{key}", 1))
+        return self.scope_manager.is_scope_visible(key)
 
     def set_scope_visible(self, key: str, visible: bool) -> None:
         """Persist and apply visibility for a single scope."""
-        self.settings.setValue(f"scope_visible_{key}", 1 if visible else 0)
-        self.settings.sync()
-        self._apply_scope_visibility()
-
-    def _apply_scope_visibility(self) -> None:
-        for key, scope in self.scopes.items():
-            scope.setVisible(self.is_scope_visible(key))
+        self.scope_manager.set_scope_visible(key, visible)
 
     # ------------------------------------------------------------------
     # Theme
@@ -674,10 +656,7 @@ class TaskbarMonitor(QWidget):
         else:
             self.mic_btn.setStyleSheet(theme.button_qss)
         self.update()
-        self.cpu_grid.update()
-        for scope in self.scopes.values():
-            scope.grid_pixmap = None
-            scope.update()
+        self.scope_manager.on_theme_changed()
         if self._battery_available:
             self.battery_widget.update()
 
@@ -701,8 +680,7 @@ class TaskbarMonitor(QWidget):
         for btn in (self.smart_btn, self.aggressive_btn, self.procs_btn,
                     self.clipboard_btn, self.snapshot_btn, self.mic_btn):
             btn.setFixedSize(btn_size, btn_size)
-        for scope in self.scopes.values():
-            scope.setMinimumWidth(scope_min_w)
+        self.scope_manager.apply_layout(scope_min_w)
         self.adjustSize()
 
     def show_snapshot_manager(self) -> None:
@@ -908,11 +886,24 @@ class TaskbarMonitor(QWidget):
         if self._auto_clean_watchdog is not None:
             self._auto_clean_watchdog.update_config(load_auto_clean_config(self.settings))
 
-    def format_speed(self, bytes_per_second: float) -> str:
-        """Format network throughput in K or M units."""
-        if bytes_per_second >= MB:
-            return f"{bytes_per_second / MB:.1f}M"
-        return f"{bytes_per_second / KB:.0f}K"
+    def show_monitor_settings(self) -> None:
+        """Open the unified monitor settings dialog."""
+        from ui.monitor_settings_dialog import open_monitor_settings_dialog
+
+        open_monitor_settings_dialog(
+            self.settings, on_apply=self._reload_sensor_settings, parent=self,
+        )
+
+    def show_sensor_diagnostics(self) -> None:
+        """Open the sensor diagnostics dialog."""
+        from ui.sensor_diagnostics_dialog import open_sensor_diagnostics_dialog
+
+        open_sensor_diagnostics_dialog(get_hub(), parent=self)
+
+    def _reload_sensor_settings(self) -> None:
+        """Re-read sensor source and telemetry/threshold settings after edits."""
+        self.scope_manager.reload()
+        get_hub().reload(str(self.settings.value("sensors/source", "auto")))
 
     def _restore_after_screenshot(self) -> None:
         self.capture_controller._restore_after_screenshot()
@@ -940,6 +931,12 @@ class TaskbarMonitor(QWidget):
 
     def pin_last_capture(self) -> None:
         self.capture_controller.pin_last_capture()
+
+    def toggle_capture_collection(self) -> None:
+        self.capture_controller.toggle_capture_collection()
+
+    def paste_capture_collection(self) -> None:
+        self.capture_controller.paste_capture_collection()
 
     def toggle_capture_toolbar(self) -> None:
         """Show or hide the floating one-click capture toolbar."""
@@ -980,9 +977,6 @@ class TaskbarMonitor(QWidget):
             per_cpu = psutil.cpu_percent(percpu=True)
             cpu = sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
             ram = psutil.virtual_memory().percent
-            self.cpu_grid.update_usage(per_cpu)
-            self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%")
-            self.scopes["ram"].update_value(ram, f"{int(ram)}%")
 
             # Auto-clean watchdog: fire a forced cleanup if RAM stays high.
             watchdog = getattr(self, "_auto_clean_watchdog", None)
@@ -993,8 +987,6 @@ class TaskbarMonitor(QWidget):
             up = float(new_net.bytes_sent - self.old_net.bytes_sent)
             down = float(new_net.bytes_recv - self.old_net.bytes_recv)
             self.old_net = new_net
-            self.scopes["up"].update_value(up, self.format_speed(up), auto_scale=True)
-            self.scopes["dn"].update_value(down, self.format_speed(down), auto_scale=True)
 
             new_disk = psutil.disk_io_counters()
             if new_disk and self.old_disk:
@@ -1004,36 +996,12 @@ class TaskbarMonitor(QWidget):
             else:
                 disk_rw = 0.0
             self.old_disk = new_disk
-            self.scopes["r/w"].update_value(disk_rw, self.format_speed(disk_rw), auto_scale=True)
 
-            if "gpu" in self.scopes or "vram" in self.scopes or "temp" in self.scopes:
-                gpu = get_gpu_stats()
-                if "gpu" in self.scopes and gpu.util_percent is not None:
-                    self.scopes["gpu"].update_value(gpu.util_percent, f"{int(gpu.util_percent)}%")
-                if "vram" in self.scopes and gpu.vram_percent is not None:
-                    vram_pct = gpu.vram_percent
-                    self.scopes["vram"].update_value(vram_pct, f"{int(vram_pct)}%")
-                if "temp" in self.scopes:
-                    c_temp = get_cpu_temp()
-                    if c_temp is None:
-                        c_temp = gpu.temp_c
-                    c_temp_f = c_temp * 9 / 5 + 32 if c_temp is not None else None
-
-                    r_temp = get_ram_temp()
-                    r_temp_f = r_temp * 9 / 5 + 32 if r_temp is not None else None
-
-                    text = ""
-                    if c_temp_f is not None:
-                        text += f"CPU: {int(c_temp_f)}°F"
-                    if r_temp_f is not None:
-                        text += f" RAM: {int(r_temp_f)}°F"
-
-                    self.scopes["temp"].update_value(
-                        value=c_temp_f if c_temp_f is not None else 0.0,
-                        text=text.strip() if text else "N/A",
-                        auto_scale=True,
-                        secondary_value=r_temp_f
-                    )
+            # CPU grid, network/disk traces, GPU/VRAM, and CPU/RAM/GPU/SSD
+            # temperatures (Celsius) are all rendered by the scope manager.
+            self.scope_manager.update(
+                per_cpu, cpu, ram, up, down, disk_rw, get_gpu_stats(), get_hub().snapshot(),
+            )
 
             if self._battery_available:
                 self.battery_widget.update_stats(get_battery())
@@ -1283,7 +1251,27 @@ def main() -> int:
     # 0% CPU briefly and the next emit shows real values.
     # Background LHM/temperature poller — keeps HTTP off the UI thread.
     QTimer.singleShot(0, start_background_pollers)
+    # After the hub has had time to read, hint (once) when CPU/SSD temps are
+    # blocked by lack of elevation but the backend is otherwise working.
+    QTimer.singleShot(4000, _hint_elevation_if_needed)
     return app.exec()
+
+
+def _hint_elevation_if_needed() -> None:
+    """Notify once when temps need Administrator rights to read."""
+    from services.win_elevation import is_elevated
+
+    if is_elevated():
+        return
+    reading = get_hub().snapshot()
+    backend_loaded = reading.backend_id != "none"
+    temps_blocked = reading.cpu_temp_c is None and reading.ssd_temp_c is None
+    if backend_loaded and temps_blocked:
+        NotificationService.notify(
+            APP_NAME,
+            "Run as Administrator to read CPU, RAM, and SSD temperatures "
+            "(GPU temperature works without it).",
+        )
 
 
 if __name__ == "__main__":

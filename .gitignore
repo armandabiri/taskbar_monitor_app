@@ -5,3 +5,6 @@ dist_pyinstaller/
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Fetched at build time, not committed
+src/assets/sensors/*.dll
