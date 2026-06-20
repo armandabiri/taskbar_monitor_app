@@ -20,7 +20,9 @@ from services.resource_control.profiles import ResourceProfile
 class ResourcePlanner:
     """Maps current system pressure to concrete reclaim and throttle actions."""
 
-    def build_plan(self, system: SystemSnapshot, profile: ResourceProfile) -> ResourcePlan:
+    def build_plan(
+        self, system: SystemSnapshot, profile: ResourceProfile, *, force: bool = False,
+    ) -> ResourcePlan:
         aggressive = profile.aggressive
         trim_threshold_gb = profile.trim_threshold_mb / 1024.0
         available_ratio = (system.available_gb / system.total_gb) if system.total_gb else 0.0
@@ -39,6 +41,14 @@ class ResourcePlanner:
         else:
             level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
                 "low", 256.0, 0.12, 2, 1, False
+
+        # Force Reclaim Now: the user explicitly asked for a full pass, so floor
+        # the tier to at least "elevated" even on a healthy system. This is what
+        # makes pressing cleanup always do meaningful work, instead of the
+        # near-no-op "low" tier below the pressure threshold.
+        if force and level == "low":
+            level, base_threshold, desired_ratio, base_trims, base_throttles, flush = \
+                "elevated", 200.0, 0.12, 4, 2, True
 
         dynamic_threshold = (
             (base_threshold / 1024.0)

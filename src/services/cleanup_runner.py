@@ -19,7 +19,7 @@ from typing import Any, Callable, Optional
 
 from PyQt6.QtCore import QObject, pyqtSignal
 
-from services.resource_control import CleanupScope, release_resources
+from services.resource_control import CancelToken, CleanupScope, release_resources
 from services.resource_control.models import ProcessCandidate
 from services.resource_control.profiles import ResourceProfile
 
@@ -55,6 +55,7 @@ class CleanupRunner(QObject):
 
     finished = pyqtSignal(object)       # emits ReleaseResult
     failed = pyqtSignal(object)         # emits Exception
+    progress = pyqtSignal(object)       # emits CleanupProgress (queued to UI thread)
     # Queued connection delivers this on the UI thread. Handler must call
     # ``provide_kill_response`` (or set ``response.result`` and ``response.event``)
     # before returning. The third arg is the dialog title to display.
@@ -66,11 +67,20 @@ class CleanupRunner(QObject):
         profile: ResourceProfile,
         scope: CleanupScope | None = None,
         kill_dialog_title: str = "Confirm cleanup",
+        force: bool = False,
+        plan_only: bool = False,
     ) -> None:
         super().__init__()
         self._profile = profile
         self._scope = scope
         self._kill_dialog_title = kill_dialog_title
+        self._force = force
+        self._plan_only = plan_only
+        self._cancel = CancelToken()
+
+    def cancel(self) -> None:
+        """Request cancellation of the in-flight run (thread-safe)."""
+        self._cancel.cancel()
 
     # ------------------------------------------------------------------
     # Worker-thread entry point
@@ -87,6 +97,10 @@ class CleanupRunner(QObject):
                 profile=self._profile,
                 scope=self._scope,
                 confirm_kill=kill_callback,
+                force=self._force,
+                plan_only=self._plan_only,
+                cancel=self._cancel,
+                progress=self.progress.emit,
             )
             self.finished.emit(result)
         except Exception as exc:  # pylint: disable=broad-exception-caught

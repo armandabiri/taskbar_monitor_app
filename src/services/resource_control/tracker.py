@@ -13,6 +13,7 @@ from services.resource_control.constants import (
 )
 from services.resource_control.models import ActivitySnapshot, ProcessTelemetry, SystemSnapshot
 from services.resource_control.profiles import ResourceProfile
+from services.resource_control.windows_ops import ThrottleState
 
 
 class ActivityTracker:
@@ -23,6 +24,10 @@ class ActivityTracker:
         self._system_activity: ActivitySnapshot | None = None
         self._trimmed_at: dict[int, float] = {}
         self._throttled_at: dict[int, float] = {}
+        # pid -> (process_name, pre-throttle scheduling state) so a throttle
+        # can be undone via "Reset throttled processes". Persists across runs
+        # until the user restores or the process exits.
+        self._throttle_journal: dict[int, tuple[str, ThrottleState]] = {}
 
     def sample_system(self, now: float | None = None) -> SystemSnapshot:
         current = now or time.monotonic()
@@ -102,11 +107,37 @@ class ActivityTracker:
     def note_throttled(self, pid: int, now: float) -> None:
         self._throttled_at[pid] = now
 
+    # ------------------------------------------------------------------
+    # Throttle journal (undo support)
+    # ------------------------------------------------------------------
+    def note_throttle_journal(self, pid: int, name: str, prior: ThrottleState) -> None:
+        """Record a process's pre-throttle state so it can be restored later.
+
+        Keeps the *earliest* snapshot if a pid is throttled more than once, so
+        restore returns the process all the way to its original state.
+        """
+        if pid not in self._throttle_journal:
+            self._throttle_journal[pid] = (name, prior)
+
+    def throttle_journal(self) -> list[tuple[int, str, ThrottleState]]:
+        """Return (pid, name, prior-state) for every journaled throttle."""
+        return [(pid, name, state) for pid, (name, state) in self._throttle_journal.items()]
+
+    def throttle_journal_size(self) -> int:
+        return len(self._throttle_journal)
+
+    def forget_throttle_journal(self, pid: int) -> None:
+        self._throttle_journal.pop(pid, None)
+
+    def clear_throttle_journal(self) -> None:
+        self._throttle_journal.clear()
+
     def forget(self, pid: int) -> None:
         """Drop all cached state for a PID that is gone."""
         self._process_activity.pop(pid, None)
         self._trimmed_at.pop(pid, None)
         self._throttled_at.pop(pid, None)
+        self._throttle_journal.pop(pid, None)
 
     def prune(self, active_pids: set[int], now: float) -> None:
         for pid, sample in list(self._process_activity.items()):
@@ -116,3 +147,7 @@ class ActivityTracker:
             for pid, stamped_at in list(cache.items()):
                 if pid not in active_pids or (now - stamped_at) > ACTIVITY_CACHE_TTL_SECONDS:
                     cache.pop(pid, None)
+        # A throttled process that has since exited can never be restored.
+        for pid in list(self._throttle_journal):
+            if pid not in active_pids:
+                self._throttle_journal.pop(pid, None)

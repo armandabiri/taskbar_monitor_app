@@ -1,5 +1,9 @@
 from PyQt6.QtGui import QColor, QImage
 
+from services.screenshot.stitch_alignment import (
+    find_horizontal_offset,
+    stitch_images_horizontal,
+)
 from services.screenshot_service import (
     _offset_fallback,
     _pack_signed_words,
@@ -120,3 +124,74 @@ def test_stitch_images() -> None:
     assert stitched.width() == 100
     assert stitched.pixelColor(50, 80) == QColor("white")
     assert stitched.pixelColor(50, 120) == QColor("black")
+
+
+def _striped_scene(width: int, height: int) -> QImage:
+    # A scene of distinct vertical stripes: each column gets a deterministic,
+    # pseudo-random colour so column signatures are unique enough to align on.
+    image = QImage(width, height, QImage.Format.Format_ARGB32)
+    for x in range(width):
+        # Spread the bits across all three channels so adjacent columns differ.
+        value = (x * 2654435761) & 0xFFFFFFFF
+        red = value & 0xFF
+        green = (value >> 8) & 0xFF
+        blue = (value >> 16) & 0xFF
+        color = QColor(red, green, blue).rgb()
+        for y in range(height):
+            image.setPixel(x, y, color)
+    return image
+
+
+def _horizontal_window(scene: QImage, left: int, width: int) -> QImage:
+    return scene.copy(left, 0, width, scene.height())
+
+
+def test_find_horizontal_offset_recovers_known_dx() -> None:
+    # A wide scene; two equal windows offset by a known dx. img2 starts dx
+    # pixels further right than img1, i.e. content scrolled LEFT by dx.
+    scene = _striped_scene(400, 120)
+    window = 200
+    for dx in (20, 37):
+        img1 = _horizontal_window(scene, 10, window)
+        img2 = _horizontal_window(scene, 10 + dx, window)
+        found = find_horizontal_offset(img1, img2)
+        assert found is not None
+        assert abs(found - dx) <= 1
+
+
+def test_find_horizontal_offset_small_image_fallback() -> None:
+    # Images at or below the 50px threshold cannot be content-matched, so the
+    # expected (history) offset is returned, clamped into the frame width.
+    img1 = QImage(40, 40, QImage.Format.Format_ARGB32)
+    img1.fill(QColor("white").rgb())
+    img2 = QImage(40, 40, QImage.Format.Format_ARGB32)
+    img2.fill(QColor("black").rgb())
+
+    assert find_horizontal_offset(img1, img2, expected_offset=15) == 15
+    # No history: defaults to 80% of the frame width.
+    assert find_horizontal_offset(img1, img2) == 32
+
+
+def test_find_horizontal_offset_size_mismatch_returns_none() -> None:
+    img1 = QImage(200, 100, QImage.Format.Format_ARGB32)
+    img1.fill(QColor("white").rgb())
+    img2 = QImage(180, 100, QImage.Format.Format_ARGB32)
+    img2.fill(QColor("white").rgb())
+
+    assert find_horizontal_offset(img1, img2) is None
+
+
+def test_stitch_images_horizontal() -> None:
+    img1 = QImage(100, 80, QImage.Format.Format_ARGB32)
+    img1.fill(QColor("white").rgb())
+
+    img2 = QImage(100, 80, QImage.Format.Format_ARGB32)
+    img2.fill(QColor("black").rgb())
+
+    stitched = stitch_images_horizontal([img1, img2], [60])
+    assert stitched is not None
+    # Width should be 100 + 60 = 160; height unchanged.
+    assert stitched.width() == 160
+    assert stitched.height() == 80
+    assert stitched.pixelColor(50, 40) == QColor("white")
+    assert stitched.pixelColor(120, 40) == QColor("black")

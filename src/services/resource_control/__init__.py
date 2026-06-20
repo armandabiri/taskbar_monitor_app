@@ -1,5 +1,7 @@
 """Public resource-control API."""
 
+from services.resource_control.cancel import CancelToken
+from services.resource_control.models import CleanupMode, CleanupScope, SkipReason
 from services.resource_control.profiles import (
     AGGRESSIVE,
     BALANCED,
@@ -23,13 +25,23 @@ from services.resource_control.profiles import (
     set_active_aggressive_profile,
     set_active_smart_profile,
 )
-from services.resource_control.models import CleanupMode, CleanupScope, SkipReason
-from services.resource_control.service import plan_cleanup, release_resources
+from services.resource_control.progress import CleanupPhase, CleanupProgress
+from services.resource_control.service import (
+    plan_cleanup,
+    release_resources,
+    reset_throttled_processes,
+    throttled_process_count,
+)
 from services.resource_control.snapshot_scope import SnapshotLiveDiff, diff_snapshot_to_live
 
 __all__ = [
     "release_resources",
     "plan_cleanup",
+    "reset_throttled_processes",
+    "throttled_process_count",
+    "CancelToken",
+    "CleanupPhase",
+    "CleanupProgress",
     "ResourceProfile",
     "CleanupMode",
     "CleanupScope",

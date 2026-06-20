@@ -29,6 +29,8 @@ def build_history_entry(result: ReleaseResult) -> CleanupHistoryEntry:
         blocked_reason_counts=dict(result.blocked_reason_counts),
         errors=list(result.errors),
         summary=result.summary,
+        system_freed_gb=result.system_freed_gb,
+        was_forced=result.was_forced,
     )
 
 

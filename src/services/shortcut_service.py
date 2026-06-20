@@ -110,6 +110,9 @@ class ShortcutService:
         self._try_register("windows+shift+e", lambda: monitor.request_capture_element.emit())
         self._try_register("windows+shift+w", lambda: monitor.request_capture_active.emit())
         self._try_register("windows+shift+s", lambda: monitor.request_capture_scrolling.emit())
+        self._try_register("windows+shift+f", lambda: monitor.request_capture_full_screen.emit())
+        self._try_register("windows+shift+d", lambda: monitor.request_capture_full_desktop.emit())
+        self._try_register("windows+shift+p", lambda: monitor.request_pin_capture.emit())
         self._try_register(
             "windows+shift+alt+r",
             lambda: monitor.request_capture_last_region.emit(),

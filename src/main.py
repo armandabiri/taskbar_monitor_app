@@ -7,10 +7,8 @@ import psutil
 from PyQt6.QtCore import (
     QEvent,
     QPoint,
-    QRect,
     QSettings,
     Qt,
-    QThread,
     QTimer,
     QUrl,
     pyqtSignal,
@@ -19,7 +17,6 @@ from PyQt6.QtGui import (
     QContextMenuEvent,
     QDesktopServices,
     QIcon,
-    QImage,
     QMouseEvent,
     QPainter,
     QPaintEvent,
@@ -59,7 +56,10 @@ from core.config import (
 )
 from core.theme import DEFAULT_THEME_MODE, THEME_MODES, ThemeEngine
 from services.app_chord_service import AppChordService, load_chord_entries
-from services.cleanup_runner import CleanupRunner, provide_kill_response
+from services.auto_clean_watchdog import (
+    AutoCleanWatchdog,
+    load_auto_clean_config,
+)
 from services.clipboard_history_service import ClipboardHistoryService
 from services.microphone_recorder import (
     MicrophoneRecorder,
@@ -70,23 +70,11 @@ from services.notification_service import NotificationService
 
 # UI
 from services.process_snapshot import ProcessSnapshot
-from services.resource_control import CleanupMode, CleanupScope, diff_snapshot_to_live
 
 # Services
 from services.resource_manager import (
     load_active_aggressive_profile,
     load_active_smart_profile,
-)
-from services.screenshot_service import (
-    ScrollingScreenshotCoordinator,
-    crop_screen_snapshot,
-    element_rects_for_screen,
-    get_foreground_window,
-    grab_screen_region,
-    grab_screen_snapshot,
-    grab_window_pixmap,
-    is_valid_capture_window,
-    window_selections_from_qt_point,
 )
 from services.shortcut_service import ShortcutService
 from services.system_info import (
@@ -100,15 +88,14 @@ from services.system_info import (
 )
 from ui.app_chord_dialog import open_app_chord_manager
 from ui.battery_widget import BatteryWidget
+from ui.capture_controller import CaptureController
+from ui.cleanup_controller import CleanupController
 from ui.cleanup_history_dialog import open_cleanup_history_dialog
-from ui.cleanup_result_dialog import open_cleanup_result_dialog
 from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.cmdline_kill_dialog import open_cmdline_kill_dialog
-from ui.kill_confirm_dialog import confirm_kill
 from ui.menu_handler import AutostartManager, ContextMenuHandler
 from ui.process_popup import TopProcessesPopup
 from ui.recording_settings_dialog import open_recording_settings_dialog
-from ui.snapshot_live_cleanup_dialog import select_snapshot_extra_processes
 from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
@@ -195,6 +182,9 @@ class TaskbarMonitor(QWidget):
     request_capture_scrolling = pyqtSignal()
     request_capture_last_region = pyqtSignal()
     request_capture_element = pyqtSignal()
+    request_capture_full_screen = pyqtSignal()
+    request_capture_full_desktop = pyqtSignal()
+    request_pin_capture = pyqtSignal()
 
     def __init__(self) -> None:
         """Initialize monitor state, UI, and update timer."""
@@ -215,6 +205,9 @@ class TaskbarMonitor(QWidget):
         self.request_capture_scrolling.connect(self.capture_scrolling)
         self.request_capture_last_region.connect(self.capture_last_region)
         self.request_capture_element.connect(self.capture_element)
+        self.request_capture_full_screen.connect(self.capture_full_screen)
+        self.request_capture_full_desktop.connect(self.capture_full_desktop)
+        self.request_pin_capture.connect(self.pin_last_capture)
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -260,10 +253,8 @@ class TaskbarMonitor(QWidget):
         self._hwnd: int = 0
         self._topmost_applied = False
         self._hidden_for_fullscreen = False
-        # Background cleanup worker state (off-UI release_resources execution).
-        self._cleanup_in_flight: bool = False
-        self._cleanup_thread: QThread | None = None
-        self._cleanup_runner: CleanupRunner | None = None
+        # Cleanup worker lifecycle + dialogs are owned by CleanupController,
+        # created after setup_ui() once the smart/aggressive buttons exist.
 
         self.menu_handler = ContextMenuHandler(self)
 
@@ -337,20 +328,16 @@ class TaskbarMonitor(QWidget):
                 + ", ".join(failed_chords),
             )
 
-        # Scrolling screenshot coordinator.
-        # TEMP (scroll-capture diagnostics): dump every capture's raw frames +
-        # stitched result to .intelag/reports/scroll_live so failures can be
-        # inspected. Remove debug_dir once scrolling capture is confirmed good.
-        from pathlib import Path as _Path
+        # Scrolling screenshot coordinator (owned by capture controller).
+        self.capture_controller = CaptureController(self)
+        self._capture_toolbar = None
 
-        scroll_debug_dir = str(
-            _Path(__file__).resolve().parents[1] / ".intelag" / "reports" / "scroll_live"
+        # Resource-cleanup flow (worker lifecycle, progress, result dialogs).
+        self.cleanup_controller = CleanupController(self)
+        self._auto_clean_watchdog = AutoCleanWatchdog(
+            load_auto_clean_config(self.settings),
+            on_fire=self.cleanup_controller.auto_clean_fire,
         )
-        self.scrolling_coordinator = ScrollingScreenshotCoordinator(
-            self, debug_dir=scroll_debug_dir
-        )
-        self.scrolling_coordinator.finished.connect(self._on_scrolling_capture_finished)
-        self.scrolling_coordinator.failed.connect(self._on_scrolling_capture_failed)
 
         # System tray
         self.tray = build_tray(
@@ -794,40 +781,8 @@ class TaskbarMonitor(QWidget):
         self._toggle_microphone_recording()
 
     def _clean_using_snapshot(self, snapshot: ProcessSnapshot) -> None:
-        """Preview and kill only the extra processes that appeared after a snapshot.
-
-        Selection happens on the UI thread (it shows the picker dialog), then
-        the actual cleanup runs on the worker thread so the UI doesn't freeze.
-        """
-        if self._cleanup_in_flight:
-            return
-        profile = self._aggressive_profile
-        try:
-            diff = diff_snapshot_to_live(snapshot)
-            selected_pids = select_snapshot_extra_processes(
-                self.settings,
-                diff,
-                parent=self,
-            )
-            if selected_pids is None:
-                return
-            scope = CleanupScope(
-                mode=CleanupMode.SNAPSHOT_EXTRAS.value,
-                snapshot_name=snapshot.name,
-                candidate_pids=frozenset(extra.pid for extra in diff.extra_processes),
-                target_pids=frozenset(selected_pids),
-                snapshot_matched_count=diff.matched_count,
-                snapshot_identity_collisions=diff.identity_collisions,
-            )
-        except Exception:  # pylint: disable=broad-exception-caught
-            LOGGER.exception("Snapshot-driven cleanup setup failed")
-            return
-
-        self._start_cleanup_worker(
-            profile=profile,
-            scope=scope,
-            mode_label=f"{profile.name} Clear (vs '{snapshot.name}')",
-        )
+        """Preview and kill only the extra processes that appeared after a snapshot."""
+        self.cleanup_controller.clean_using_snapshot(snapshot)
 
     def reload_resource_profiles(self) -> None:
         """Re-read smart/aggressive profile bindings from QSettings."""
@@ -921,137 +876,37 @@ class TaskbarMonitor(QWidget):
         return os.path.abspath(os.path.normpath(path))
 
     def _on_release_resources(self, aggressive: bool = False) -> None:
-        """Trigger resource release on a background thread; UI stays responsive.
+        """Trigger resource release on a background thread; UI stays responsive."""
+        self.cleanup_controller.request_release(aggressive=aggressive)
 
-        ``release_resources`` walks every running process via
-        ``psutil.process_iter`` and performs Win32 working-set/standby
-        operations. Running it on the UI thread froze the app for 5–20s on
-        busy systems. We now drive it from a worker QThread and marshal the
-        optional kill-confirmation dialog back to the UI thread via a
-        queued signal in :class:`services.cleanup_runner.CleanupRunner`.
-        """
-        if getattr(self, "_cleanup_in_flight", False):
-            return  # Re-entry guard: ignore clicks while a cleanup is running.
+    def force_reclaim(self) -> None:
+        """Run a full cleanup pass, bypassing the memory-pressure threshold."""
+        self.cleanup_controller.force_reclaim()
 
-        btn = self.aggressive_btn if aggressive else self.smart_btn
-        btn.setEnabled(False)
-        old_text = btn.text()
-        btn.setText("⏳")
+    def preview_cleanup(self) -> None:
+        """Scan + score without acting, then confirm before running."""
+        self.cleanup_controller.preview_cleanup()
 
-        profile = self._aggressive_profile if aggressive else self._smart_profile
-        self._start_cleanup_worker(
-            profile=profile,
-            scope=None,
-            mode_label=f"{profile.name} Clear",
-            on_done_btn=btn,
-            on_done_btn_text=old_text,
+    def flush_standby_cache(self) -> None:
+        """Purge the Windows standby file cache directly."""
+        self.cleanup_controller.flush_standby_cache()
+
+    def reset_throttled(self) -> None:
+        """Restore processes throttled by a previous cleanup."""
+        self.cleanup_controller.reset_throttled()
+
+    def show_auto_clean_settings(self) -> None:
+        """Open the auto-clean watchdog settings dialog."""
+        from ui.auto_clean_settings_dialog import open_auto_clean_settings_dialog
+
+        open_auto_clean_settings_dialog(
+            self.settings, on_apply=self.reload_auto_clean_config, parent=self,
         )
 
-    def _start_cleanup_worker(
-        self,
-        *,
-        profile,
-        scope,
-        mode_label: str,
-        on_done_btn=None,
-        on_done_btn_text: str = "",
-    ) -> None:
-        """Spin up the worker QThread and wire its signals to UI handlers."""
-        self._cleanup_in_flight = True
-        thread = QThread(self)
-        runner = CleanupRunner(
-            profile=profile,
-            scope=scope,
-            kill_dialog_title=f"Confirm {profile.name} Cleanup",
-        )
-        runner.moveToThread(thread)
-
-        # Bound-method receiver lives on TaskbarMonitor (UI thread), so Qt
-        # auto-selects a queued connection when the worker thread emits.
-        runner.request_kill_dialog.connect(self._on_kill_dialog_request)
-        runner.finished.connect(
-            lambda result: self._on_cleanup_done(
-                result, profile, mode_label, on_done_btn, on_done_btn_text, thread, runner,
-            )
-        )
-        runner.failed.connect(
-            lambda exc: self._on_cleanup_failed(
-                exc, on_done_btn, on_done_btn_text, thread, runner,
-            )
-        )
-        thread.started.connect(runner.run)
-        # Track so __del__ doesn't yank them mid-flight if the user closes the window.
-        self._cleanup_thread = thread
-        self._cleanup_runner = runner
-        thread.start()
-
-    def _on_kill_dialog_request(self, candidates, response, title: str) -> None:
-        """Runs on the UI thread (queued from worker). Show dialog, return result."""
-        try:
-            approved = confirm_kill(
-                self,
-                candidates,
-                title=title,
-                warning_prefix="background",
-            )
-        except Exception:  # pylint: disable=broad-exception-caught
-            LOGGER.exception("confirm_kill dialog failed")
-            approved = None
-        provide_kill_response(response, approved)
-
-    def _on_cleanup_done(
-        self, result, profile, mode_label, btn, btn_text, thread, runner,
-    ) -> None:
-        try:
-            LOGGER.info("Resource release (%s): %s", profile.name, result.summary)
-            tooltip = f"Last freed: {result.ram_freed_gb:.2f} GB"
-            if result.errors:
-                tooltip += f" — {len(result.errors)} error(s)"
-                self._last_release_error_count = len(result.errors)
-            else:
-                self._last_release_error_count = 0
-            self._present_cleanup_result(mode_label, result)
-            if btn is not None:
-                btn.setToolTip(tooltip)
-        finally:
-            self._teardown_cleanup_worker(thread, runner)
-            if btn is not None:
-                QTimer.singleShot(600, lambda: self._restore_btn(btn, btn_text))
-
-    def _on_cleanup_failed(self, exc, btn, btn_text, thread, runner) -> None:
-        LOGGER.error("Resource release failed: %s", exc, exc_info=exc)
-        if btn is not None:
-            btn.setToolTip("Release failed — see log")
-        self._teardown_cleanup_worker(thread, runner)
-        if btn is not None:
-            QTimer.singleShot(600, lambda: self._restore_btn(btn, btn_text))
-
-    def _teardown_cleanup_worker(self, thread, runner) -> None:
-        self._cleanup_in_flight = False
-        try:
-            thread.quit()
-            thread.wait(2000)
-        except RuntimeError:
-            pass
-        runner.deleteLater()
-        thread.deleteLater()
-        if getattr(self, "_cleanup_thread", None) is thread:
-            self._cleanup_thread = None
-            self._cleanup_runner = None
-
-    def _present_cleanup_result(self, mode_name: str, result) -> None:
-        """Show the cleanup toast and open diagnostics when needed."""
-        NotificationService.notify_cleanup(mode_name, result)
-        if result.errors or result.processes_cleaned_total == 0:
-            title = f"{mode_name} Result"
-            if result.errors:
-                title = f"{mode_name} Result (partial)"
-            open_cleanup_result_dialog(result, title=title, parent=self)
-
-    def _restore_btn(self, btn: QPushButton, text: str) -> None:
-        """Restore the release button state."""
-        btn.setText(text)
-        btn.setEnabled(True)
+    def reload_auto_clean_config(self) -> None:
+        """Re-read auto-clean watchdog config from settings."""
+        if self._auto_clean_watchdog is not None:
+            self._auto_clean_watchdog.update_config(load_auto_clean_config(self.settings))
 
     def format_speed(self, bytes_per_second: float) -> str:
         """Format network throughput in K or M units."""
@@ -1060,321 +915,60 @@ class TaskbarMonitor(QWidget):
         return f"{bytes_per_second / KB:.0f}K"
 
     def _restore_after_screenshot(self) -> None:
-        self.show()
-        self.raise_()
-        self._apply_win32_topmost()
-
-    def _close_screenshot_selectors(self, *, restore: bool) -> None:
-        for selector in list(self.selectors):
-            selector.close()
-        self.selectors.clear()
-        if restore:
-            self._restore_after_screenshot()
-
-    def _screen_by_name(self, screen_name: str):
-        for screen in QApplication.screens():
-            if screen.name() == screen_name:
-                return screen
-        return QApplication.primaryScreen()
-
-    def _store_last_capture_region(self, screen, local_rect: QRect) -> None:
-        self.last_capture_rect = QRect(local_rect)
-        self.last_capture_screen_name = screen.name()
-        self.settings.setValue("last_capture_rect_x", local_rect.x())
-        self.settings.setValue("last_capture_rect_y", local_rect.y())
-        self.settings.setValue("last_capture_rect_w", local_rect.width())
-        self.settings.setValue("last_capture_rect_h", local_rect.height())
-        self.settings.setValue("last_capture_screen_name", screen.name())
-        self.settings.sync()
-
-    def _copy_pixmap_to_clipboard(self, pixmap, failure_message: str) -> bool:
-        try:
-            if pixmap.isNull():
-                LOGGER.warning("%s", failure_message)
-                NotificationService.notify(APP_NAME, failure_message)
-                return False
-            image = pixmap.toImage().convertToFormat(QImage.Format.Format_RGB32)
-            self.clipboard.setImage(image)
-            return True
-        finally:
-            self._restore_after_screenshot()
-
-    def _copy_region_to_clipboard(
-        self,
-        screen,
-        local_rect: QRect,
-    ) -> bool:
-        QApplication.processEvents()
-        pixmap = grab_screen_region(screen, local_rect)
-        return self._copy_pixmap_to_clipboard(
-            pixmap,
-            "Failed to capture screenshot region.",
-        )
+        self.capture_controller._restore_after_screenshot()
 
     def capture_regional(self) -> None:
-        """Trigger regional screenshot using a custom interactive capture overlay."""
-        self._close_screenshot_selectors(restore=False)
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(50, self._show_region_selectors)
-
-    def _show_region_selectors(self) -> None:
-        from PyQt6.QtGui import QGuiApplication
-
-        from ui.screenshot_overlay import RegionSelector
-
-        screens = QGuiApplication.screens()
-        if not screens:
-            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
-            self._restore_after_screenshot()
-            return
-
-        screen_snapshots = []
-        for screen in screens:
-            snapshot = grab_screen_snapshot(screen)
-            if not snapshot.isNull():
-                screen_snapshots.append((screen, snapshot))
-
-        if not screen_snapshots:
-            NotificationService.notify(APP_NAME, "Failed to capture screen for selection.")
-            self._restore_after_screenshot()
-            return
-
-        def on_selected(local_rect: QRect, screen, snapshot) -> None:
-            selected_rect = QRect(local_rect)
-            selected_screen = screen
-            selected_snapshot = snapshot
-            self._close_screenshot_selectors(restore=False)
-
-            def capture_after_overlay_closes() -> None:
-                pixmap = crop_screen_snapshot(
-                    selected_snapshot,
-                    selected_screen,
-                    selected_rect,
-                )
-                copied = self._copy_pixmap_to_clipboard(
-                    pixmap,
-                    "Failed to capture screenshot region.",
-                )
-                if copied and not selected_rect.isEmpty():
-                    self._store_last_capture_region(selected_screen, selected_rect)
-
-            QTimer.singleShot(20, capture_after_overlay_closes)
-
-        def on_cancelled() -> None:
-            self._close_screenshot_selectors(restore=True)
-
-        for screen, snapshot in screen_snapshots:
-            selector = RegionSelector(screen, snapshot, on_selected, on_cancelled)
-            self.selectors.append(selector)
-            selector.show()
+        self.capture_controller.capture_regional()
 
     def capture_element(self) -> None:
-        """Trigger smart element capture using a hover-highlight overlay."""
-        self._close_screenshot_selectors(restore=False)
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(80, self._show_element_selectors)
-
-    def _show_element_selectors(self) -> None:
-        from PyQt6.QtGui import QGuiApplication
-
-        from services.uia_service import collect_element_rects
-        from ui.screenshot_overlay import ElementSelector
-
-        screens = QGuiApplication.screens()
-        if not screens:
-            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
-            self._restore_after_screenshot()
-            return
-
-        # Resolve element rectangles once, while the desktop is still uncovered,
-        # then hit-test them locally on each per-screen overlay.
-        native_rects = collect_element_rects()
-        screen_data = []
-        for screen in screens:
-            snapshot = grab_screen_snapshot(screen)
-            if not snapshot.isNull():
-                rects = element_rects_for_screen(screen, native_rects)
-                screen_data.append((screen, snapshot, rects))
-
-        if not screen_data:
-            NotificationService.notify(APP_NAME, "Failed to capture screen for selection.")
-            self._restore_after_screenshot()
-            return
-
-        def on_selected(local_rect: QRect, screen, snapshot) -> None:
-            selected_rect = QRect(local_rect)
-            selected_screen = screen
-            selected_snapshot = snapshot
-            self._close_screenshot_selectors(restore=False)
-
-            def capture_after_overlay_closes() -> None:
-                pixmap = crop_screen_snapshot(
-                    selected_snapshot,
-                    selected_screen,
-                    selected_rect,
-                )
-                copied = self._copy_pixmap_to_clipboard(
-                    pixmap,
-                    "Failed to capture element.",
-                )
-                if copied and not selected_rect.isEmpty():
-                    self._store_last_capture_region(selected_screen, selected_rect)
-
-            QTimer.singleShot(20, capture_after_overlay_closes)
-
-        def on_cancelled() -> None:
-            self._close_screenshot_selectors(restore=True)
-
-        for screen, snapshot, rects in screen_data:
-            selector = ElementSelector(screen, snapshot, rects, on_selected, on_cancelled)
-            self.selectors.append(selector)
-            selector.show()
+        self.capture_controller.capture_element()
 
     def capture_last_region(self) -> None:
-        """Repeat screenshot of the last captured region."""
-        if self.last_capture_rect is None or not self.last_capture_screen_name:
-            NotificationService.notify(
-                APP_NAME,
-                "No previous regional screenshot found to repeat.",
-            )
-            return
-
-        target_screen = self._screen_by_name(str(self.last_capture_screen_name))
-        if target_screen is None:
-            NotificationService.notify(APP_NAME, "No screen found for repeating screenshot.")
-            return
-
-        local_rect = QRect(self.last_capture_rect)
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(
-            80,
-            lambda: self._copy_region_to_clipboard(
-                target_screen,
-                local_rect,
-            ),
-        )
+        self.capture_controller.capture_last_region()
 
     def capture_active_window(self) -> None:
-        """Capture the currently active foreground window to the clipboard."""
-        hwnd = get_foreground_window()
-
-        try:
-            own_hwnd = int(self.winId())
-        except (AttributeError, ValueError):
-            own_hwnd = 0
-
-        if not is_valid_capture_window(hwnd, own_hwnd):
-            LOGGER.warning("Active window is invalid for screenshot.")
-            NotificationService.notify(APP_NAME, "No active window found for screenshot.")
-            return
-
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(50, lambda: self._capture_window_to_clipboard(hwnd))
-
-    def _capture_window_to_clipboard(self, hwnd: int) -> None:
-        try:
-            pixmap = grab_window_pixmap(hwnd)
-            if pixmap.isNull():
-                LOGGER.warning("Active window screenshot returned a null pixmap.")
-                NotificationService.notify(APP_NAME, "Failed to capture active window.")
-                return
-            self.clipboard.setPixmap(pixmap)
-        finally:
-            self._restore_after_screenshot()
+        self.capture_controller.capture_active_window()
 
     def capture_scrolling(self) -> None:
-        """Trigger scrolling screenshot by first letting the user click a target window."""
-        self._close_screenshot_selectors(restore=False)
-        self.hide()
-        QApplication.processEvents()
-        QTimer.singleShot(50, self._show_scroll_selectors)
+        self.capture_controller.capture_scrolling()
 
-    def _show_scroll_selectors(self) -> None:
-        from PyQt6.QtGui import QGuiApplication
+    def capture_full_screen(self) -> None:
+        self.capture_controller.capture_full_screen()
 
-        from ui.screenshot_overlay import ScrollSelector
+    def capture_full_desktop(self) -> None:
+        self.capture_controller.capture_full_desktop()
 
-        screens = QGuiApplication.screens()
-        if not screens:
-            NotificationService.notify(APP_NAME, "No screens available for screenshot.")
-            self._restore_after_screenshot()
+    def pin_last_capture(self) -> None:
+        self.capture_controller.pin_last_capture()
+
+    def toggle_capture_toolbar(self) -> None:
+        """Show or hide the floating one-click capture toolbar."""
+        bar = self._capture_toolbar
+        if bar is None:
+            from ui.capture_toolbar import CaptureToolbar
+
+            bar = CaptureToolbar()
+            bar.region_requested.connect(self.capture_regional)
+            bar.element_requested.connect(self.capture_element)
+            bar.full_screen_requested.connect(self.capture_full_screen)
+            bar.scrolling_requested.connect(self.capture_scrolling)
+            bar.settings_requested.connect(self.show_screenshot_settings)
+            self._capture_toolbar = bar
+        if bar.isVisible():
+            bar.hide()
             return
+        bar.dock_near(self)
+        bar.show()
+        bar.raise_()
 
-        def on_selected(
-            global_pos: QPoint,
-            viewport_rect: QRect | None,
-            viewport_screen,
-        ) -> None:
-            clicked_pos = QPoint(global_pos)
-            selected_viewport_rect = QRect(viewport_rect) if viewport_rect is not None else QRect()
-            selected_viewport_screen = viewport_screen
-            selector_hwnds: set[int] = set()
-            for selector in self.selectors:
-                try:
-                    selector_hwnds.add(int(selector.winId()))
-                except (AttributeError, ValueError):
-                    pass
-            self._close_screenshot_selectors(restore=False)
+    def show_screenshot_settings(self) -> None:
+        from ui.screenshot_settings_dialog import open_screenshot_settings_dialog
 
-            def start_after_overlay_closes() -> None:
-                try:
-                    own_hwnd = int(self.winId())
-                except (AttributeError, ValueError):
-                    own_hwnd = 0
-                excluded_hwnds = set(selector_hwnds)
-                if own_hwnd:
-                    excluded_hwnds.add(own_hwnd)
-
-                for selection in window_selections_from_qt_point(clicked_pos):
-                    if (
-                        selection.capture_hwnd in excluded_hwnds
-                        or selection.scroll_hwnd in excluded_hwnds
-                    ):
-                        continue
-                    if not is_valid_capture_window(selection.capture_hwnd, own_hwnd):
-                        continue
-                    self.scrolling_coordinator.start(
-                        selection.capture_hwnd,
-                        selection.scroll_hwnd,
-                        selected_viewport_screen,
-                        selected_viewport_rect,
-                    )
-                    return
-
-                NotificationService.notify(APP_NAME, "No window found at clicked location.")
-                self._restore_after_screenshot()
-
-            QTimer.singleShot(120, start_after_overlay_closes)
-
-        def on_cancelled() -> None:
-            self._close_screenshot_selectors(restore=True)
-
-        for screen in screens:
-            selector = ScrollSelector(screen, on_selected, on_cancelled)
-            self.selectors.append(selector)
-            selector.show()
-
-    def _on_scrolling_capture_finished(self, image: QImage) -> None:
-        """Called when scrolling capture sequence completes successfully."""
-        if self.clipboard is not None:
-            self.clipboard.setImage(image)
-        self.show()
-        self.raise_()
-        self._apply_win32_topmost()
-
-    def _on_scrolling_capture_failed(self, reason: str) -> None:
-        """Called when scrolling capture sequence fails."""
-        NotificationService.notify(
-            APP_NAME,
-            f"Scrolling screenshot failed: {reason}"
+        open_screenshot_settings_dialog(
+            self.settings,
+            on_apply=self.capture_controller.reload_scroll_settings,
+            parent=self,
         )
-        self.show()
-        self.raise_()
-        self._apply_win32_topmost()
 
     def update_stats(self) -> None:
         """Poll system stats and refresh monitor widgets."""
@@ -1389,6 +983,11 @@ class TaskbarMonitor(QWidget):
             self.cpu_grid.update_usage(per_cpu)
             self.scopes["cpu"].update_value(cpu, f"{int(cpu)}%")
             self.scopes["ram"].update_value(ram, f"{int(ram)}%")
+
+            # Auto-clean watchdog: fire a forced cleanup if RAM stays high.
+            watchdog = getattr(self, "_auto_clean_watchdog", None)
+            if watchdog is not None:
+                watchdog.observe(ram)
 
             new_net = psutil.net_io_counters()
             up = float(new_net.bytes_sent - self.old_net.bytes_sent)

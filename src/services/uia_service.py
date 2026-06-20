@@ -366,13 +366,9 @@ def scroll_target_from_native_point(
     *,
     max_depth: int = 16,
 ) -> UiaScrollTarget | None:
-    """Walk up from the element at (x, y) to the nearest vertically scrollable one."""
-    element = element_from_native_point(x, y)
-    depth = 0
-    while element is not None and depth < max_depth:
-        target = element.as_scroll_target()
-        if target is not None and target.vertically_scrollable():
-            return target
-        element = element.parent()
-        depth += 1
-    return None
+    """Walk ancestors from (x, y) and return the smallest vertically scrollable element."""
+    from services.uia_scroll_targets import (  # noqa: PLC0415
+        resolve_scroll_target_from_native_point,
+    )
+
+    return resolve_scroll_target_from_native_point(x, y, max_depth=max_depth)

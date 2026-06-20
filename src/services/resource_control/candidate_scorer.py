@@ -26,6 +26,9 @@ from services.resource_control.models import (
     SkipReason,
 )
 from services.resource_control.profiles import ResourceProfile
+from services.resource_control.uss_prefetch import read_uss_gb
+
+_MISSING = object()  # distinguishes "pid absent from cache" from a cached None USS
 
 
 class CandidateScorer:
@@ -44,6 +47,7 @@ class CandidateScorer:
         visible_window_pids: frozenset[int] = frozenset(),
         tray_icon_pids: frozenset[int] = frozenset(),
         own_username: str | None = None,
+        uss_cache: dict[int, float | None] | None = None,
     ) -> CandidateDecision:
         pid = int(info["pid"])
         name = (info.get("name") or "").lower()
@@ -97,7 +101,7 @@ class CandidateScorer:
             or max_activity > 0.0
             or (profile.enable_kill and same_user)
         )
-        uss_gb = self._get_uss_gb(proc) if needs_uss else None
+        uss_gb = self._get_uss_gb(proc, uss_cache) if needs_uss else None
         estimated = self._estimate_reclaimable_gb(rss_gb, uss_gb, plan.trim_threshold_gb)
         tags = self._hot_tags(proc, cpu_percent, disk_gb_s, other_gb_s, plan, is_foreground)
         kill_eligible = bool(
@@ -154,22 +158,6 @@ class CandidateScorer:
             eligible_for_kill=kill_eligible,
         )
 
-    def select_trim_targets(
-        self, candidates: list[ProcessCandidate], plan: ResourcePlan,
-    ) -> list[ProcessCandidate]:
-        selected: list[ProcessCandidate] = []
-        if plan.max_trimmed_processes <= 0:
-            return selected
-        estimated_total = 0.0
-        for candidate in self.rank_trim_candidates(candidates):
-            selected.append(candidate)
-            estimated_total += candidate.estimated_reclaim_gb
-            if len(selected) >= plan.max_trimmed_processes:
-                break
-            if not plan.aggressive and estimated_total >= plan.reclaim_target_gb * 1.15:
-                break
-        return selected
-
     def rank_trim_candidates(self, candidates: list[ProcessCandidate]) -> list[ProcessCandidate]:
         """Return trim candidates ordered from best to worst reclaim value."""
         return sorted(candidates, key=lambda item: item.reclaim_score, reverse=True)
@@ -224,13 +212,12 @@ class CandidateScorer:
     def _get_age_seconds(self, create_time: float | None, now_wall: float) -> float | None:
         return None if create_time is None else max(now_wall - float(create_time), 0.0)
 
-    def _get_uss_gb(self, proc: psutil.Process) -> float | None:
-        try:
-            full_info = proc.memory_full_info()
-        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
-            return None
-        uss = getattr(full_info, "uss", None)
-        return None if uss is None else float(uss) / GB
+    def _get_uss_gb(
+        self, proc: psutil.Process, cache: dict[int, float | None] | None = None,
+    ) -> float | None:
+        if cache is not None and (cached := cache.get(proc.pid, _MISSING)) is not _MISSING:
+            return cached  # type: ignore[return-value]
+        return read_uss_gb(proc)
 
     def _effective_cpu_percent(
         self, telemetry: ProcessTelemetry, age_seconds: float | None,
