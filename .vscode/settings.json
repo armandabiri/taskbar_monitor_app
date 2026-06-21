@@ -128,4 +128,5 @@
     "chat.tools.terminal.enableAutoApprove": true,
     "markdown.extension.completion.enabled": false,
     "markdown.extension.tableFormatter.enabled": false,
+    "intelag.websiteViewer.entryPoint": "d:\\INTELAG\\repo\\intelag_website\\intelag-website\\index.html",
 }
