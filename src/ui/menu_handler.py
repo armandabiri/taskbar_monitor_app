@@ -132,6 +132,11 @@ class AppMenuBuilder:
             cleanup_history_action.triggered.connect(parent.show_cleanup_history)
         menu.addAction(cleanup_history_action)
 
+        app_overhead_action = QAction("App Footprint…", parent)
+        if isinstance(parent, MonitorProtocol):
+            app_overhead_action.triggered.connect(parent.show_app_overhead)
+        menu.addAction(app_overhead_action)
+
         # Resource cleanup submenu — quick actions + profile picker + settings
         if isinstance(parent, MonitorProtocol):
             build_cleanup_menu(menu, parent)

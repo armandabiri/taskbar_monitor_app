@@ -48,11 +48,30 @@ class SensorHub:
         self._thread = threading.Thread(target=self._run, name="sensor-hub", daemon=True)
         self._thread.start()
 
-    def stop(self) -> None:
-        """Stop the refresh thread and close backends."""
+    def stop(self, timeout_s: float = 2.0) -> None:
+        """Signal the refresh thread, join it, then close backends and finalize NVML.
+
+        Idempotent: a second call is a no-op so closeEvent/aboutToQuit may both fire.
+        Stops reads BEFORE closing native handles to avoid a backend.read()/close race.
+        """
+        if not self._started:
+            return
         self._stop.set()
+        thread = self._thread
+        self._thread = None
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=max(0.0, timeout_s))
         for backend in self._backends:
-            backend.close()
+            try:
+                backend.close()
+            except Exception:  # pylint: disable=broad-exception-caught
+                LOGGER.exception("sensors: backend %s close failed", backend.id)
+        # Finalize NVML once everything that could call into it has stopped.
+        from services.sensors.nvml_backend import nvml_shutdown
+        try:
+            nvml_shutdown()
+        except Exception:  # pylint: disable=broad-exception-caught
+            LOGGER.exception("sensors: nvml_shutdown failed")
         self._started = False
 
     def reload(self, source: str) -> None:

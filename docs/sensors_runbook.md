@@ -25,6 +25,44 @@ Temperature reads live in the `services.sensors` package:
 The `ui.scope_manager.ScopeManager` translates each cached reading into the
 oscilloscope scopes (`temp`, `gputemp`, `ssdtemp`), thermal alerts, and telemetry.
 
+## Sampler architecture
+
+System metrics (CPU, RAM, network, disk, top processes) are collected by
+`SystemSampler`, a `QObject` that runs on a dedicated daemon worker thread.
+
+- The UI thread never calls `psutil` directly; it receives `SystemSnapshot`
+  objects via a cross-thread `snapshot_ready` signal.
+- Top processes are refreshed at a separate `top_proc_refresh_s` cadence (2 s)
+  so the process popup stays up-to-date without extra polling.
+- The process popup subscribes to `snapshot_ready` on show and unsubscribes on
+  hide, so it consumes no CPU when hidden.
+
+### Adaptive cadence
+
+The sampler interval adapts to the app's visibility:
+
+| QSettings key | Default | Meaning |
+| --- | --- | --- |
+| `sampler/active_interval_ms` | 1000 | Poll rate when the widget is visible. |
+| `sampler/hidden_interval_ms` | 5000 | Poll rate when the widget is hidden/minimised. |
+| `sampler/pause_on_battery` | false | Stretch to `hidden_interval_ms` whenever on battery power. |
+
+Edit these in **Monitor Settings…** (Cadence section).
+
+## Shutdown hygiene
+
+`MonitorLifecycle` holds an ordered registry of stop callbacks (sampler → topmost
+controller → sensor hub). On close, `shutdown()` signals each component to stop,
+then joins its worker thread with a bounded timeout. The sensor hub signals its
+refresh thread, closes all backends, and calls `nvml_shutdown()` exactly once, so
+NVML handles are released before the process exits.
+
+## App Footprint (self-overhead panel)
+
+**App Footprint…** (app menu) opens a read-only dialog showing the monitor's own
+CPU usage and RSS memory via `AppMetricsProbe.sample()`, alongside the last
+cleanup-history entry so you can see how much overhead a cleanup consumed.
+
 ## Backend selection (`sensors/source`)
 
 Set in **Monitor Settings…**. Values:
@@ -58,6 +96,10 @@ Enable in **Monitor Settings…** (`telemetry/enabled`). Readings append to
 `sensor_telemetry.csv` (or `.jsonl`) under the app-data directory. Columns:
 `taken_at,cpu_temp_c,ram_temp_c,gpu_temp_c,ssd_temp_c,backend_id`. The file is
 trimmed to `telemetry/retention_rows` (default 50000).
+
+The writer keeps the file handle open between writes (no per-row open/close) and
+rotates via `os.replace` on a `.bak` so the header is always preserved. The hot
+path never reads the whole file.
 
 ## Refreshing / pinning the bundled DLL
 

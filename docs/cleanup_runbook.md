@@ -54,6 +54,38 @@ or above a threshold for a debounce window, then waits out a cooldown before it
 can fire again. Configure enable / threshold / sustained-for / cooldown in
 **Resource Cleanup → Auto-clean settings…**.
 
+## Safety bounds (deadline, kill budget, flush timeout)
+
+`CleanupBounds` guards every run against getting stuck:
+
+| QSettings key | Default | Meaning |
+| --- | --- | --- |
+| `cleanup/deadline_s` | 120 | Hard wall-clock deadline for the whole run. |
+| `cleanup/kill_budget_s` | 30 | Total time the kill phase may spend across all targets. |
+| `cleanup/per_kill_graceful_s` | 3 | Graceful-terminate wait per process. |
+| `cleanup/per_kill_force_s` | 5 | Force-kill wait per process. |
+| `cleanup/max_candidates` | 50 | Maximum processes the kill phase will consider. |
+| `cleanup/flush_timeout_s` | 10 | Per-flush-call timeout (system flush opt-in only). |
+| `cleanup/enable_system_flush` | false | Opt-in to flush modified pages / working sets / standby cache during a run (same as the manual Flush standby cache action, applied automatically at the end). |
+
+Runs that hit the deadline or kill-budget cap are reported as partial: the result
+dialog lists how many candidates were skipped and why.
+
+## Cancellation guarantees
+
+Pressing **Cancel** during a run (or an automatic cancel from the watchdog):
+
+- The cancel signal is checked *between* every process in the trim, throttle, and
+  kill loops — so at most one more process is touched after you press Cancel.
+- The post-run settle (system-RAM measurement) also aborts immediately on cancel.
+- The result dialog marks the run as cancelled and reports whatever was completed.
+
+## Run watchdog
+
+If a run is still active `deadline_s + 5 s` after it started, the watchdog
+automatically calls Cancel and fires a desktop notification. This prevents a hung
+background thread from blocking the next cleanup or app exit.
+
 ## Troubleshooting
 
 - **"I pressed cleanup and nothing happened."** The system was below the pressure

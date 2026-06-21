@@ -15,6 +15,7 @@ from typing import Callable, Optional
 
 from services.resource_control import runner_common as rc
 from services.resource_control import system_reclaim as _system_reclaim
+from services.resource_control.bounds import CleanupBounds
 from services.resource_control.cancel import CancelToken
 from services.resource_control.history import append_history
 from services.resource_control.models import (
@@ -66,6 +67,7 @@ def release_resources(
     plan_only: bool = False,
     cancel: CancelToken | None = None,
     progress: ProgressCallback | None = None,
+    bounds: CleanupBounds | None = None,
 ) -> ReleaseResult:
     """Release RAM and safely throttle/terminate hot background processes.
 
@@ -102,9 +104,10 @@ def release_resources(
                 plan_only=plan_only,
                 cancel=cancel,
                 progress=progress,
+                bounds=bounds,
             )
             if is_system and not plan_only and not (cancel is not None and cancel.cancelled):
-                _measure_system_freed(result, progress)
+                _measure_system_freed(result, progress, cancel=cancel)
     finally:
         result.memory_after_gb = _sample_available_gb()
         if not plan_only:
@@ -128,14 +131,24 @@ def release_resources(
 plan_cleanup = release_resources
 
 
-def _measure_system_freed(result: ReleaseResult, progress: ProgressCallback | None) -> None:
+def _measure_system_freed(
+    result: ReleaseResult,
+    progress: ProgressCallback | None,
+    *,
+    cancel: CancelToken | None = None,
+) -> None:
     """Re-sample available RAM after a short settle and record the real delta."""
     from services.resource_control import progress as progress_mod
 
     progress_mod.emit(progress, CleanupProgress(CleanupPhase.VERIFYING))
     if result.memory_before_gb is None:
         return
-    time.sleep(_SETTLE_SECONDS)
+    # Cancellable settle — abandon the post-run measurement on cancel.
+    if cancel is not None:
+        if cancel.wait(_SETTLE_SECONDS):
+            return
+    else:
+        time.sleep(_SETTLE_SECONDS)
     after = _sample_available_gb()
     if after is None:
         return

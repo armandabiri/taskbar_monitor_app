@@ -51,6 +51,9 @@ class MonitorProtocol(Protocol):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
 
+    def show_app_overhead(self) -> None:
+        """Open the app self-overhead / footprint dialog."""
+
     def show_cmdline_kill_dialog(self) -> None:
         """Open kill-by-WMI-command-line dialog."""
 

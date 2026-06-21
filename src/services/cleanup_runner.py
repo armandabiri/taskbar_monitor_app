@@ -20,6 +20,7 @@ from typing import Any, Callable, Optional
 from PyQt6.QtCore import QObject, pyqtSignal
 
 from services.resource_control import CancelToken, CleanupScope, release_resources
+from services.resource_control.bounds import CleanupBounds
 from services.resource_control.models import ProcessCandidate
 from services.resource_control.profiles import ResourceProfile
 
@@ -31,8 +32,10 @@ UiKillDialogFn = Callable[[list[ProcessCandidate]], Optional[list[ProcessCandida
 
 # How long the worker will wait for the UI to respond to a kill request. If the
 # UI is genuinely unresponsive (e.g. crashed), the worker times out and skips
-# the kill phase rather than hang forever.
-KILL_DIALOG_WAIT_TIMEOUT_S = 300.0
+# the kill phase rather than hang forever. 60s is well above any realistic
+# user-think delay but short enough that an unresponsive UI no longer orphans
+# the worker for five minutes.
+KILL_DIALOG_WAIT_TIMEOUT_S = 60.0
 
 
 class _KillResponse:
@@ -69,6 +72,7 @@ class CleanupRunner(QObject):
         kill_dialog_title: str = "Confirm cleanup",
         force: bool = False,
         plan_only: bool = False,
+        bounds: CleanupBounds | None = None,
     ) -> None:
         super().__init__()
         self._profile = profile
@@ -76,7 +80,12 @@ class CleanupRunner(QObject):
         self._kill_dialog_title = kill_dialog_title
         self._force = force
         self._plan_only = plan_only
+        self._bounds = bounds or CleanupBounds()
         self._cancel = CancelToken()
+
+    @property
+    def bounds(self) -> CleanupBounds:
+        return self._bounds
 
     def cancel(self) -> None:
         """Request cancellation of the in-flight run (thread-safe)."""
@@ -101,6 +110,7 @@ class CleanupRunner(QObject):
                 plan_only=self._plan_only,
                 cancel=self._cancel,
                 progress=self.progress.emit,
+                bounds=self._bounds,
             )
             self.finished.emit(result)
         except Exception as exc:  # pylint: disable=broad-exception-caught

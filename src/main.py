@@ -78,8 +78,8 @@ from services.system_info import (
     get_battery,
     get_gpu_stats,
     start_background_pollers,
-    stop_background_pollers,
 )
+from services.system_sampler import SystemSampler, choose_interval
 from ui.app_chord_dialog import open_app_chord_manager
 from ui.battery_widget import BatteryWidget
 from ui.capture_controller import CaptureController
@@ -88,12 +88,14 @@ from ui.cleanup_history_dialog import open_cleanup_history_dialog
 from ui.clipboard_popup import ClipboardHistoryPopup
 from ui.cmdline_kill_dialog import open_cmdline_kill_dialog
 from ui.menu_handler import AutostartManager, ContextMenuHandler
+from ui.monitor_lifecycle import MonitorLifecycle
 from ui.process_popup import TopProcessesPopup
 from ui.recording_settings_dialog import open_recording_settings_dialog
 from ui.scope_manager import ScopeManager
 from ui.snapshot_manager_dialog import open_snapshot_manager
 from ui.system_tray import build_tray
 from ui.timer_widget import CountdownTimerWidget
+from ui.topmost_controller import TopmostController
 from ui.widgets import DragHandle
 
 # Layout density presets — (margin_h, margin_v, spacing, scope_min_width, btn_size)
@@ -105,53 +107,6 @@ LAYOUT_PRESETS: dict[str, tuple[int, int, int, int, int]] = {
 DEFAULT_LAYOUT_MODE = "standard"
 
 LOGGER = logging.getLogger(__name__)
-
-
-# Win32 constants for window styles
-_GWL_EXSTYLE = -20
-_WS_EX_TOOLWINDOW = 0x00000080
-_WS_EX_TOPMOST = 0x00000008
-_WS_EX_NOACTIVATE = 0x08000000
-_WS_EX_LAYERED = 0x00080000
-_WS_EX_TRANSPARENT = 0x00000020
-_HWND_TOPMOST = -1
-_HWND_NOTOPMOST = -2
-_SWP_NOMOVE = 0x0002
-_SWP_NOSIZE = 0x0001
-_SWP_NOACTIVATE = 0x0010
-_SWP_NOZORDER = 0x0004
-_SWP_FRAMECHANGED = 0x0020
-_WM_WINDOWPOSCHANGING = 0x0046
-
-
-class _POINT(ctypes.Structure):
-    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
-
-
-class _MSG(ctypes.Structure):
-    """Windows MSG — only fields we need, full layout so ctypes aligns right."""
-    _fields_ = [
-        ("hwnd", ctypes.c_ssize_t),
-        ("message", ctypes.c_uint),
-        ("wParam", ctypes.c_ssize_t),
-        ("lParam", ctypes.c_ssize_t),
-        ("time", ctypes.c_ulong),
-        ("pt", _POINT),
-        ("lPrivate", ctypes.c_ulong),
-    ]
-
-
-class _WINDOWPOS(ctypes.Structure):
-    """Windows WINDOWPOS struct — layout must match native Win32."""
-    _fields_ = [
-        ("hwnd", ctypes.c_ssize_t),
-        ("hwndInsertAfter", ctypes.c_ssize_t),
-        ("x", ctypes.c_int),
-        ("y", ctypes.c_int),
-        ("cx", ctypes.c_int),
-        ("cy", ctypes.c_int),
-        ("flags", ctypes.c_uint),
-    ]
 
 
 def get_resource_path(relative_path: str) -> str:
@@ -217,6 +172,15 @@ class TaskbarMonitor(QWidget):
 
         self.settings = QSettings(APP_ORG, APP_NAME)
         self.interval = read_setting_int(self.settings, "interval", DEFAULT_INTERVAL_MS)
+        self._active_interval_ms = read_setting_int(
+            self.settings, "sampler/active_interval_ms", DEFAULT_INTERVAL_MS
+        )
+        self._hidden_interval_ms = read_setting_int(
+            self.settings, "sampler/hidden_interval_ms", 5000
+        )
+        self._pause_on_battery = bool(read_setting_int(
+            self.settings, "sampler/pause_on_battery", 0
+        ))
         self.bg_opacity = read_setting_int(self.settings, "bg_opacity", DEFAULT_BG_OPACITY)
         self.click_through = bool(read_setting_int(
             self.settings, "click_through", DEFAULT_CLICK_THROUGH))
@@ -237,8 +201,6 @@ class TaskbarMonitor(QWidget):
         else:
             self.last_capture_rect = None
 
-        self.old_net = psutil.net_io_counters()
-        self.old_disk = psutil.disk_io_counters()
         self.clipboard = QApplication.clipboard()
         if self.clipboard is None:
             raise RuntimeError("QApplication clipboard is not available")
@@ -249,8 +211,9 @@ class TaskbarMonitor(QWidget):
         self.m_resize = False
         self.m_resize_edge = ""
         self.m_drag_pos = QPoint()
-        self._hwnd: int = 0
-        self._topmost_applied = False
+        self._topmost = TopmostController()
+        self._topmost.set_click_through_preference(self.click_through)
+        self.lifecycle = MonitorLifecycle()
         self._hidden_for_fullscreen = False
         # Cleanup worker lifecycle + dialogs are owned by CleanupController,
         # created after setup_ui() once the smart/aggressive buttons exist.
@@ -289,19 +252,27 @@ class TaskbarMonitor(QWidget):
 
         self.setup_ui()
 
+        self.sampler = SystemSampler(parent=self)
+        self.sampler.snapshot_ready.connect(self._render_snapshot)
+        self.sampler.start_worker(self.interval)
+        self.lifecycle.register("sampler_worker", self.sampler.stop_worker)
+
+        # UI-thread timer drives only UI-local periodic checks (microphone
+        # sync, fullscreen autohide). Heavy sampling runs in the sampler's
+        # worker thread.
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.update_stats)
         self.timer.timeout.connect(self._check_fullscreen_autohide)
         self.timer.start(self.interval)
+        self.lifecycle.register("update_timer", self.timer.stop)
 
-        # Topmost enforcement: nativeEvent rewrites WM_WINDOWPOSCHANGING in
-        # real time so this timer only exists as a safety net for cases where
-        # no Z-order change message is generated (rare). 500ms was overkill —
-        # 2s keeps DWM/Z-order recompute cost off the hot path.
-        self.topmost_timer = QTimer(self)
-        self.topmost_timer.setInterval(2000)
-        self.topmost_timer.timeout.connect(self._enforce_topmost)
-        self.topmost_timer.start()
+        self.topmost_timer = self._topmost.start_safety_timer(self, 2000)
+        self.lifecycle.register("topmost_timer", self._topmost.stop_safety_timer)
+
+        # SensorHub owns its own thread + native handles (CLR computer, NVML).
+        # Register here so shutdown stops reads, joins the thread, then closes
+        # backends and calls nvmlShutdown in a race-free order.
+        self.lifecycle.register("sensor_hub", get_hub().stop)
 
         self.load_geometry()
 
@@ -360,66 +331,44 @@ class TaskbarMonitor(QWidget):
         )
 
     # ------------------------------------------------------------------
-    # Window topmost enforcement
+    # Window topmost enforcement (delegates to TopmostController)
     # ------------------------------------------------------------------
     def _apply_win32_topmost(self) -> None:
-        """Apply Win32 extended styles. Idempotent — safe to call repeatedly."""
-        try:
-            self._hwnd = int(self.winId())
-            user32 = ctypes.windll.user32
-            cur_style = user32.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
-            new_style = cur_style | _WS_EX_TOOLWINDOW | _WS_EX_TOPMOST | _WS_EX_NOACTIVATE
-            if self.click_through:
-                new_style |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT
-            if new_style != cur_style:
-                user32.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, new_style)
-            user32.SetWindowPos(
-                self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
-                _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_FRAMECHANGED,
-            )
-            self._topmost_applied = True
-        except OSError as exc:
-            LOGGER.warning("Failed to apply Win32 topmost styles: %s", exc)
+        self._topmost.attach(self)
 
     def _enforce_topmost(self) -> None:
-        """Periodically re-assert topmost Z-order via Win32 API."""
-        if not self._hwnd or not self.isVisible():
-            return
-        try:
-            user32 = ctypes.windll.user32
-            swp_flags = _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE
-            # Toggle trick forces DWM to recompute Z-order above the Win11 taskbar.
-            user32.SetWindowPos(self._hwnd, _HWND_NOTOPMOST, 0, 0, 0, 0, swp_flags)
-            user32.SetWindowPos(self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0, swp_flags)
-        except OSError:
-            pass
+        self._topmost.enforce()
+
+    @property
+    def _hwnd(self) -> int:
+        return self._topmost.hwnd
 
     def nativeEvent(self, event_type, message):  # noqa: N802  # pylint: disable=invalid-name
-        """Intercept WM_WINDOWPOSCHANGING to pin ourselves at HWND_TOPMOST.
-
-        Windows sends WM_WINDOWPOSCHANGING before every Z-order change. By
-        rewriting the `hwndInsertAfter` field to HWND_TOPMOST in-place, we
-        prevent the Win11 taskbar (or any other window) from ever being
-        placed above us — even between ticks of the 500ms enforcement timer.
-        """
-        try:
-            if event_type == b"windows_generic_MSG" and self._topmost_applied:
-                msg = ctypes.cast(int(message), ctypes.POINTER(_MSG)).contents
-                if msg.message == _WM_WINDOWPOSCHANGING and msg.lParam:
-                    wp = ctypes.cast(msg.lParam, ctypes.POINTER(_WINDOWPOS)).contents
-                    if not (wp.flags & _SWP_NOZORDER):
-                        wp.hwndInsertAfter = _HWND_TOPMOST  # -1
-        except (ValueError, OSError):
-            pass
+        self._topmost.handle_native_event(event_type, message)
         return False, 0
 
     def showEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
-        """Re-apply topmost every time the window becomes visible."""
         super().showEvent(a0)
-        # Synchronous re-apply (mirrors the originally-working pattern).
-        # winId() will force HWND creation if not yet realized.
-        self._apply_win32_topmost()
-        self._enforce_topmost()
+        self._topmost.attach(self)
+        self._topmost.enforce()
+        self._apply_cadence()
+
+    def hideEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
+        super().hideEvent(a0)
+        self._apply_cadence()
+
+    def _apply_cadence(self) -> None:
+        """Adjust the sampler interval for current visibility and power state."""
+        bat = get_battery()
+        on_battery = bat is not None and not bat.plugged
+        interval = choose_interval(
+            self._active_interval_ms,
+            self._hidden_interval_ms,
+            visible=self.isVisible(),
+            on_battery=on_battery,
+            pause_on_battery=self._pause_on_battery,
+        )
+        self.sampler.set_interval(interval)
 
     # ------------------------------------------------------------------
     # Click-through toggle
@@ -429,24 +378,7 @@ class TaskbarMonitor(QWidget):
         self.click_through = enabled
         self.settings.setValue("click_through", 1 if enabled else 0)
         self.settings.sync()
-        if self._hwnd:
-            try:
-                user32 = ctypes.windll.user32
-                cur = user32.GetWindowLongW(self._hwnd, _GWL_EXSTYLE)
-                if enabled:
-                    cur |= _WS_EX_LAYERED | _WS_EX_TRANSPARENT
-                else:
-                    # Remove both LAYERED and TRANSPARENT — leaving LAYERED on
-                    # causes Windows 11 DWM to mis-handle topmost z-order.
-                    cur &= ~(_WS_EX_TRANSPARENT | _WS_EX_LAYERED)
-                user32.SetWindowLongW(self._hwnd, _GWL_EXSTYLE, cur)
-                # Force topmost re-assertion so the change doesn't demote us.
-                user32.SetWindowPos(
-                    self._hwnd, _HWND_TOPMOST, 0, 0, 0, 0,
-                    _SWP_NOMOVE | _SWP_NOSIZE | _SWP_NOACTIVATE | _SWP_FRAMECHANGED,
-                )
-            except OSError as exc:
-                LOGGER.warning("Failed to toggle click-through: %s", exc)
+        self._topmost.set_click_through(enabled)
         NotificationService.notify(
             APP_NAME,
             "Click-through ON — window ignores mouse. Press Ctrl+Shift+Alt+C to disable."
@@ -492,7 +424,7 @@ class TaskbarMonitor(QWidget):
     def show_processes_popup(self) -> None:
         """Open (or raise) the top-processes popup."""
         if self.process_popup is None:
-            self.process_popup = TopProcessesPopup()
+            self.process_popup = TopProcessesPopup(sampler=self.sampler)
         pos = self.pos()
         self.process_popup.move(pos.x(), max(0, pos.y() - 240))
         self.process_popup.show()
@@ -690,6 +622,11 @@ class TaskbarMonitor(QWidget):
     def show_cleanup_history(self) -> None:
         """Open the cleanup history dialog."""
         open_cleanup_history_dialog(parent=self)
+
+    def show_app_overhead(self) -> None:
+        """Open the app self-overhead dialog."""
+        from ui.self_overhead_dialog import open_self_overhead_dialog
+        open_self_overhead_dialog(parent=self)
 
     def show_cmdline_kill_dialog(self) -> None:
         """Kill processes whose WMI CommandLine matches a saved regex."""
@@ -968,50 +905,33 @@ class TaskbarMonitor(QWidget):
         )
 
     def update_stats(self) -> None:
-        """Poll system stats and refresh monitor widgets."""
+        """UI-thread housekeeping. Sampling happens off-thread in the sampler."""
         try:
             self._sync_microphone_recording_status()
-            # Single per-CPU sample; average it for the scalar scope to avoid
-            # calling cpu_percent() twice (each call resets psutil's internal
-            # baseline, which distorts readings).
-            per_cpu = psutil.cpu_percent(percpu=True)
-            cpu = sum(per_cpu) / len(per_cpu) if per_cpu else 0.0
-            ram = psutil.virtual_memory().percent
-
-            # Auto-clean watchdog: fire a forced cleanup if RAM stays high.
-            watchdog = getattr(self, "_auto_clean_watchdog", None)
-            if watchdog is not None:
-                watchdog.observe(ram)
-
-            new_net = psutil.net_io_counters()
-            up = float(new_net.bytes_sent - self.old_net.bytes_sent)
-            down = float(new_net.bytes_recv - self.old_net.bytes_recv)
-            self.old_net = new_net
-
-            new_disk = psutil.disk_io_counters()
-            if new_disk and self.old_disk:
-                r_diff = new_disk.read_bytes - self.old_disk.read_bytes
-                w_diff = new_disk.write_bytes - self.old_disk.write_bytes
-                disk_rw = float(r_diff + w_diff)
-            else:
-                disk_rw = 0.0
-            self.old_disk = new_disk
-
-            # CPU grid, network/disk traces, GPU/VRAM, and CPU/RAM/GPU/SSD
-            # temperatures (Celsius) are all rendered by the scope manager.
-            self.scope_manager.update(
-                per_cpu, cpu, ram, up, down, disk_rw, get_gpu_stats(), get_hub().snapshot(),
-            )
-
-            if self._battery_available:
-                self.battery_widget.update_stats(get_battery())
-
-            # Orchestrated timer tick
-            self.countdown_timer.tick()
-        except (psutil.Error, RuntimeError):
-            LOGGER.exception("Failed to update taskbar monitor statistics")
         except Exception:  # pylint: disable=broad-exception-caught
             LOGGER.exception("Unexpected error during stats update")
+
+    def _render_snapshot(self, snap) -> None:
+        """Render a SystemSnapshot — pure UI, no syscalls on this path."""
+        try:
+            watchdog = getattr(self, "_auto_clean_watchdog", None)
+            if watchdog is not None:
+                watchdog.observe(snap.ram_percent)
+            self.scope_manager.update(
+                list(snap.per_cpu),
+                snap.cpu_avg,
+                snap.ram_percent,
+                snap.net_up_bps,
+                snap.net_down_bps,
+                snap.disk_rw_bps,
+                snap.gpu_stats,
+                snap.sensors,
+            )
+            if self._battery_available:
+                self.battery_widget.update_stats(snap.battery)
+            self.countdown_timer.tick()
+        except RuntimeError:
+            LOGGER.exception("Failed to render snapshot")
 
     # ------------------------------------------------------------------
     # Geometry & settings
@@ -1185,10 +1105,11 @@ class TaskbarMonitor(QWidget):
         if a0 is not None and a0.type() == QEvent.Type.WindowStateChange:
             if self.minimize_to_tray and self.isMinimized():
                 QTimer.singleShot(0, self.hide)
+            self._apply_cadence()
         super().changeEvent(a0)
 
     def closeEvent(self, a0) -> None:  # noqa: N802  # pylint: disable=invalid-name
-        """Cleanup shortcuts on close."""
+        """Cleanup shortcuts on close — ordered teardown via MonitorLifecycle."""
         if self._microphone_recorder.is_recording:
             try:
                 self._microphone_recorder.stop_recording()
@@ -1196,7 +1117,7 @@ class TaskbarMonitor(QWidget):
                 LOGGER.exception("Failed to stop microphone recording during shutdown")
         self.shortcut_service.unregister_all()
         self.app_chord_service.unregister_all()
-        stop_background_pollers()
+        self.lifecycle.shutdown()
         if self.tray is not None:
             self.tray.hide()
         super().closeEvent(a0)

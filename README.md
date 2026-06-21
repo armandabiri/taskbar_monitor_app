@@ -21,10 +21,25 @@ Taskbar Monitor is a Windows 11 desktop utility built with PyQt6. It combines a 
   short settle, alongside the per-trim estimate.
 - **Auto-clean watchdog** — opt-in; fires a forced Smart cleanup when RAM stays
   under pressure for a debounce window, then respects a cooldown (off by default).
+- **Cleanup safety bounds** — configurable deadline, kill-budget, per-process
+  timeouts, and candidate cap prevent runaway runs; partial results are reported.
+- **Per-item cancel** — Cancel is checked between every process in each phase;
+  the run stops within one extra process of the button press.
+- **Run watchdog** — if a cleanup exceeds its deadline by 5 s, it is cancelled
+  automatically and a desktop notification fires.
+- **Opt-in system flush** — bounded flush of modified pages / working sets /
+  standby cache can be enabled per-run via `cleanup/enable_system_flush`.
 - **Reset throttled processes** — restore priority/affinity of processes a cleanup
   throttled.
 - **Flush standby cache** — purge the Windows standby file cache directly.
 - Faster scanning — USS lookups for large processes run on a bounded thread pool.
+- **Adaptive sampler cadence** — system metrics are collected on a background
+  thread; the poll rate automatically slows when the widget is hidden or the
+  machine is on battery (configurable in Monitor Settings).
+- **Shared process table** — the process popup reads the sampler's cached snapshot
+  instead of calling psutil on every open; no extra background threads.
+- **App Footprint** — **App Footprint…** (app menu) shows the monitor's own CPU
+  and memory usage alongside the last cleanup-history entry.
 - Process snapshots stored as CSV under the writable app-data directory.
 - Snapshot extra-process cleanup preview:
   - compare a saved snapshot to the live system

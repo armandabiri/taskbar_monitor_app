@@ -42,6 +42,21 @@ def _init_nvml() -> None:
         _NVML_READY = False
 
 
+def nvml_shutdown() -> None:
+    """Finalize NVML once. Safe to call when never initialized or already shut down."""
+    global _NVML_READY, _NVML_HANDLE
+    if not _NVML_READY or _NVML is None:
+        _NVML_HANDLE = None
+        _NVML_READY = False
+        return
+    try:
+        _NVML.nvmlShutdown()  # type: ignore[attr-defined]
+    except Exception as exc:  # pylint: disable=broad-exception-caught
+        LOGGER.debug("nvmlShutdown failed: %s", exc)
+    _NVML_HANDLE = None
+    _NVML_READY = False
+
+
 @dataclass
 class GPUStats:
     """GPU telemetry snapshot. All fields may be None when unavailable."""

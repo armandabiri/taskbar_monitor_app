@@ -1,12 +1,16 @@
 """System-wide memory reclaim: scan -> trim -> throttle -> kill -> flush.
 
-Extracted from the former monolithic ``service`` module. The runner owns the
-full system-reclaim sequence and now supports three orthogonal controls added
-by the cleanup uplift:
+The runner owns the full system-reclaim sequence and supports the
+cleanup-safety controls added by the uplift:
 
-* ``force``     – bypass the pressure-threshold gate and run a full pass.
-* ``plan_only`` – scan + score only; execute nothing (dry-run preview).
-* ``cancel`` / ``progress`` – cooperative cancel + per-phase progress reporting.
+* ``force``     – bypass the pressure-threshold gate.
+* ``plan_only`` – scan + score only; execute nothing.
+* ``cancel`` / ``progress`` – cooperative cancel + per-phase progress.
+* ``bounds``    – wall-clock + cardinality caps (deadline, kill budget,
+  max candidates, flush timeout, system-flush opt-in).
+
+The flush phase + per-item kill bookkeeping live in :mod:`flush_phase` to
+keep this module under the 300-line code-size cap.
 """
 
 from __future__ import annotations
@@ -14,11 +18,13 @@ from __future__ import annotations
 import os
 import time
 
+from services.resource_control import flush_phase as _flush
 from services.resource_control import progress as progress_mod
 from services.resource_control import runner_common as rc
+from services.resource_control.bounds import CleanupBounds
 from services.resource_control.cancel import CancelToken
 from services.resource_control.models import ProcessCandidate, ReleaseResult, SkipReason
-from services.resource_control.profiles import FLUSH_ALWAYS, FLUSH_NEVER, ResourceProfile
+from services.resource_control.profiles import ResourceProfile
 from services.resource_control.progress import CleanupPhase, CleanupProgress, ProgressCallback
 from services.resource_control.system_scan import scan_system_reclaim
 
@@ -38,8 +44,11 @@ class SystemReclaimRunner:
         plan_only: bool = False,
         cancel: CancelToken | None = None,
         progress: ProgressCallback | None = None,
+        bounds: CleanupBounds | None = None,
     ) -> None:
         del scope
+        bounds = bounds or CleanupBounds()
+        deadline_at = time.monotonic() + max(0.0, bounds.deadline_s)
         result.was_forced = force
         result.plan_only = plan_only
         now_mono = time.monotonic()
@@ -87,6 +96,13 @@ class SystemReclaimRunner:
             progress=progress,
         )
         candidates = [d.candidate for d in decisions if d.candidate is not None]
+        if bounds.max_candidates > 0 and len(candidates) > bounds.max_candidates:
+            dropped = len(candidates) - bounds.max_candidates
+            candidates = candidates[: bounds.max_candidates]
+            result.notes.append(
+                f"Capped candidates at {bounds.max_candidates}; "
+                f"{dropped} lower-priority candidate(s) skipped."
+            )
         result.candidates_considered = len(decisions)
         result.kill_candidates_found = len(rc.select_kill_targets(candidates, profile))
 
@@ -96,13 +112,14 @@ class SystemReclaimRunner:
             progress_mod.emit(progress, CleanupProgress(CleanupPhase.DONE, executed=0))
             return
 
-        if cancel is not None and cancel.cancelled:
+        if _flush.cancelled(cancel):
             result.notes.append("Run cancelled before any action was taken.")
             return
 
         self._execute(
             profile, plan, candidates, confirm_kill, now_mono, result,
             cancel=cancel, progress=progress,
+            bounds=bounds, deadline_at=deadline_at,
         )
 
     def _execute(
@@ -116,29 +133,41 @@ class SystemReclaimRunner:
         *,
         cancel: CancelToken | None,
         progress: ProgressCallback | None,
+        bounds: CleanupBounds,
+        deadline_at: float,
     ) -> None:
-        if profile.enable_trim and not _cancelled(cancel):
+        if profile.enable_trim and not _stop(cancel, deadline_at, result, "trim"):
             progress_mod.emit(progress, CleanupProgress(CleanupPhase.TRIMMING, executed=0))
-            execute_trim_phase(candidates, plan, now_mono, result, cancel=cancel)
+            execute_trim_phase(
+                candidates, plan, now_mono, result,
+                cancel=cancel, deadline_at=deadline_at,
+            )
 
-        if profile.enable_throttle and not _cancelled(cancel):
+        if profile.enable_throttle and not _stop(cancel, deadline_at, result, "throttle"):
             progress_mod.emit(progress, CleanupProgress(CleanupPhase.THROTTLING, executed=0))
             for candidate in rc.SCORER.select_throttle_targets(candidates, plan):
-                if _cancelled(cancel):
+                if _stop(cancel, deadline_at, result, "throttle"):
                     break
                 rc.do_throttle(
                     candidate, rc.PLANNER.build_throttle_action(candidate, plan), now_mono, result,
                 )
 
-        if profile.enable_kill and not _cancelled(cancel):
+        if profile.enable_kill and not _stop(cancel, deadline_at, result, "kill"):
             progress_mod.emit(progress, CleanupProgress(CleanupPhase.KILLING, executed=0))
-            self._run_kill_phase(profile, candidates, confirm_kill, result)
+            self._run_kill_phase(
+                profile, candidates, confirm_kill, result,
+                cancel=cancel, bounds=bounds, deadline_at=deadline_at,
+            )
 
-        if not _cancelled(cancel):
+        if not _stop(cancel, deadline_at, result, "flush"):
             progress_mod.emit(progress, CleanupProgress(CleanupPhase.FLUSHING, executed=0))
-            self._run_flush_phase(profile, plan, result)
+            _flush.run_flush_phase(profile, plan, result, bounds=bounds, cancel=cancel)
 
-    def _run_kill_phase(self, profile, candidates, confirm_kill, result: ReleaseResult) -> None:
+    def _run_kill_phase(
+        self, profile, candidates, confirm_kill, result: ReleaseResult,
+        *, cancel: CancelToken | None,
+        bounds: CleanupBounds, deadline_at: float,
+    ) -> None:
         kill_targets = rc.select_kill_targets(candidates, profile)
         if kill_targets and confirm_kill is not None:
             approved = confirm_kill(kill_targets)
@@ -151,32 +180,36 @@ class SystemReclaimRunner:
                 kill_targets = approved
         else:
             result.kill_confirmed = bool(kill_targets) if kill_targets else None
+        kill_budget_at = time.monotonic() + max(0.0, bounds.kill_budget_s)
+        skipped = 0
         for candidate in kill_targets:
-            rc.do_kill(candidate, result)
-
-    def _run_flush_phase(self, profile: ResourceProfile, plan, result: ReleaseResult) -> None:
-        if profile.flush_modified_pages:
-            try:
-                result.modified_pages_flushed = rc.OPERATOR.flush_modified_pages()
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                rc.append_error(result, f"flush_modified_pages: {exc}")
-        if profile.empty_all_working_sets:
-            try:
-                result.working_sets_emptied = rc.OPERATOR.empty_all_working_sets()
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                rc.append_error(result, f"empty_all_working_sets: {exc}")
-        if _should_flush_standby(profile, plan):
-            try:
-                available_gb = rc.sample_available_gb() or 0.0
-                needed = available_gb < plan.desired_available_gb
-                if profile.flush_standby == FLUSH_ALWAYS or needed:
-                    result.standby_flushed = rc.OPERATOR.flush_standby_cache()
-            except Exception as exc:  # pylint: disable=broad-exception-caught
-                rc.append_error(result, f"flush_standby: {exc}")
+            if _flush.cancelled(cancel):
+                skipped = len(kill_targets) - result.processes_killed
+                result.notes.append("Kill phase stopped by cancel.")
+                break
+            now = time.monotonic()
+            if now >= deadline_at or now >= kill_budget_at:
+                skipped = len(kill_targets) - result.processes_killed
+                result.notes.append(
+                    f"Kill phase stopped at budget/deadline; {skipped} target(s) skipped."
+                )
+                break
+            _flush.do_kill_bounded(candidate, result, bounds=bounds)
+        if skipped:
+            result.processes_skipped += skipped
 
 
-def _cancelled(cancel: CancelToken | None) -> bool:
-    return cancel is not None and cancel.cancelled
+def _stop(
+    cancel: CancelToken | None, deadline_at: float, result: ReleaseResult, phase: str,
+) -> bool:
+    if _flush.cancelled(cancel):
+        return True
+    if time.monotonic() >= deadline_at:
+        note = f"{phase} phase skipped — run deadline reached."
+        if note not in result.notes:
+            result.notes.append(note)
+        return True
+    return False
 
 
 def execute_trim_phase(
@@ -186,12 +219,9 @@ def execute_trim_phase(
     result: ReleaseResult,
     *,
     cancel: CancelToken | None = None,
+    deadline_at: float | None = None,
 ) -> None:
-    """Trim candidates until the per-run budget is exhausted.
-
-    Gentle profiles stop early once the estimated reclaim goal is met;
-    aggressive profiles spend the full trim budget.
-    """
+    """Trim candidates until the per-run budget is exhausted."""
     ranked = rc.SCORER.rank_trim_candidates(candidates)
     if not ranked or plan.max_trimmed_processes <= 0:
         return
@@ -205,7 +235,9 @@ def execute_trim_phase(
     for attempt_count, candidate in enumerate(ranked, start=1):
         if success_count >= plan.max_trimmed_processes:
             break
-        if _cancelled(cancel):
+        if _flush.cancelled(cancel):
+            break
+        if deadline_at is not None and time.monotonic() >= deadline_at:
             break
         if not plan.aggressive and success_count > 0 and estimated_success_gb >= reclaim_goal_gb:
             break
@@ -214,14 +246,6 @@ def execute_trim_phase(
         if rc.do_trim(candidate, now_mono, result):
             success_count += 1
             estimated_success_gb += candidate.estimated_reclaim_gb
-            # Pause briefly so the kernel writes evicted pages back to disk in a
-            # steady trickle instead of one storm.
+            # Pause briefly so the kernel writes evicted pages back to disk
+            # in a steady trickle instead of one storm.
             time.sleep(0.03)
-
-
-def _should_flush_standby(profile: ResourceProfile, plan) -> bool:
-    if profile.flush_standby == FLUSH_NEVER:
-        return False
-    if profile.flush_standby == FLUSH_ALWAYS:
-        return True
-    return plan.should_flush_standby

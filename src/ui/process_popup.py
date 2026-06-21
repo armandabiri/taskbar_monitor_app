@@ -1,13 +1,16 @@
 """Popup window listing the top processes by CPU / RAM.
 
-Process iteration runs on a background QThread so the UI never blocks
-while psutil walks ~300 processes (each cpu_percent/memory_info call
-can take a few milliseconds and quickly add up on the UI thread).
+The popup is a pure consumer of the shared ``SystemSampler`` snapshot —
+it never walks ``psutil.process_iter`` itself. When visible it listens for
+``snapshot_ready`` and re-renders from ``snap.top_processes``; when hidden
+it disconnects to avoid pointless work.
 """
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal
+from typing import Any
+
+from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QHBoxLayout,
@@ -19,51 +22,15 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from services.system_info import ProcessRow, get_top_processes
+from services.system_info import ProcessRow
 
-POPUP_REFRESH_MS = 2500
-
-
-class _ProcessFetcher(QThread):
-    """Background worker that polls top processes and emits rows."""
-
-    results_ready = pyqtSignal(list)  # list[ProcessRow]
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self._sort_by: str = "cpu"
-        self._limit: int = 10
-        self._running = True
-        self._interval_ms = POPUP_REFRESH_MS
-
-    def set_sort(self, mode: str) -> None:
-        self._sort_by = mode
-
-    def stop(self) -> None:
-        self._running = False
-        # Wake the thread if it's in msleep() so it exits promptly.
-        self.requestInterruption()
-
-    def run(self) -> None:
-        while self._running and not self.isInterruptionRequested():
-            try:
-                rows = get_top_processes(limit=self._limit, sort_by=self._sort_by)
-                self.results_ready.emit(rows)
-            except Exception:  # pylint: disable=broad-exception-caught
-                self.results_ready.emit([])
-            # Sleep in small chunks so stop() wakes us quickly
-            total = 0
-            while (total < self._interval_ms
-                   and self._running
-                   and not self.isInterruptionRequested()):
-                self.msleep(100)
-                total += 100
+POPUP_ROW_LIMIT = 10
 
 
 class TopProcessesPopup(QWidget):
-    """Small floating window showing the top processes."""
+    """Small floating window showing the top processes from the shared sampler."""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, sampler: Any = None, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setWindowFlags(
             Qt.WindowType.Tool
@@ -117,20 +84,30 @@ class TopProcessesPopup(QWidget):
         self.table.setFont(QFont("Segoe UI", 9))
         layout.addWidget(self.table)
 
-        # Placeholder row so the popup shows immediately, before the first
-        # worker result arrives.
         self.table.setRowCount(1)
         self.table.setItem(0, 0, QTableWidgetItem("Loading…"))
 
-        self._fetcher: _ProcessFetcher | None = None
+        self._sampler = sampler
+        self._sort_by = "cpu"
+        self._connected = False
 
     def _set_sort(self, mode: str) -> None:
         self.btn_cpu.setChecked(mode == "cpu")
         self.btn_ram.setChecked(mode == "ram")
-        if self._fetcher is not None:
-            self._fetcher.set_sort(mode)
+        self._sort_by = mode
+        if self._sampler is not None:
+            latest = self._sampler.latest()
+            if latest is not None and latest.top_processes is not None:
+                self.apply_snapshot(latest)
 
-    def _apply_rows(self, rows: list[ProcessRow]) -> None:
+    def apply_snapshot(self, snap: Any) -> None:
+        """Render the popup from a SystemSnapshot.top_processes payload."""
+        rows: list[ProcessRow] = list(snap.top_processes or [])
+        if self._sort_by == "ram":
+            rows.sort(key=lambda r: r.ram_mb, reverse=True)
+        else:
+            rows.sort(key=lambda r: r.cpu_percent, reverse=True)
+        rows = rows[:POPUP_ROW_LIMIT]
         self.table.setRowCount(len(rows))
         for i, row in enumerate(rows):
             self.table.setItem(i, 0, QTableWidgetItem(row.name))
@@ -138,33 +115,19 @@ class TopProcessesPopup(QWidget):
             self.table.setItem(i, 2, QTableWidgetItem(f"{row.ram_mb:.0f}"))
 
     def showEvent(self, a0) -> None:  # pylint: disable=invalid-name
-        """Spawn a background fetcher while the popup is visible."""
-        if self._fetcher is None or not self._fetcher.isRunning():
-            self._fetcher = _ProcessFetcher(self)
-            self._fetcher.results_ready.connect(self._apply_rows)
-            self._fetcher.set_sort("cpu" if self.btn_cpu.isChecked() else "ram")
-            # Run below normal priority so heavy process enumeration yields
-            # to the rest of the UI and the system.
-            self._fetcher.start(QThread.Priority.LowPriority)
+        if self._sampler is not None and not self._connected:
+            self._sampler.snapshot_ready.connect(self.apply_snapshot)
+            self._connected = True
+            latest = self._sampler.latest()
+            if latest is not None and latest.top_processes is not None:
+                self.apply_snapshot(latest)
         super().showEvent(a0)
 
     def hideEvent(self, a0) -> None:  # pylint: disable=invalid-name
-        """Stop the background thread so it doesn't keep polling processes."""
-        if self._fetcher is not None:
-            self._fetcher.stop()
-            # Don't block the UI — give the thread ~500ms to exit, then move on
-            QTimer.singleShot(500, self._reap_fetcher)
+        if self._sampler is not None and self._connected:
+            try:
+                self._sampler.snapshot_ready.disconnect(self.apply_snapshot)
+            except (TypeError, RuntimeError):
+                pass
+            self._connected = False
         super().hideEvent(a0)
-
-    def _reap_fetcher(self) -> None:
-        if self._fetcher is not None and self._fetcher.isRunning():
-            self._fetcher.wait(200)
-        self._fetcher = None
-
-    def closeEvent(self, a0) -> None:  # pylint: disable=invalid-name
-        """Ensure the fetcher thread is stopped on close."""
-        if self._fetcher is not None:
-            self._fetcher.stop()
-            self._fetcher.wait(500)
-            self._fetcher = None
-        super().closeEvent(a0)

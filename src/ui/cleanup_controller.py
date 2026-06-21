@@ -1,11 +1,4 @@
-"""Owns the resource-cleanup user flow: worker lifecycle, progress, results.
-
-Extracted from ``main.py`` (mirrors :class:`ui.capture_controller.CaptureController`).
-Drives :class:`services.cleanup_runner.CleanupRunner` on a background thread,
-shows the live progress/cancel overlay, and presents the preview/result
-dialogs — including the new Force Reclaim, Preview, Flush standby and Reset
-throttled actions.
-"""
+"""Owns the resource-cleanup user flow: worker lifecycle, progress, results."""
 
 from __future__ import annotations
 
@@ -31,6 +24,9 @@ from ui.snapshot_live_cleanup_dialog import select_snapshot_extra_processes
 
 LOGGER = logging.getLogger(__name__)
 
+WATCHDOG_GRACE_S = 5.0
+TEARDOWN_WAIT_MS = 5000
+
 
 class CleanupController:
     """Coordinates cleanup runs and their UI for the taskbar monitor."""
@@ -42,6 +38,7 @@ class CleanupController:
         self._runner: CleanupRunner | None = None
         self._progress = CleanupProgressDialog(monitor)
         self._progress.cancel_clicked.connect(self._on_cancel_clicked)
+        self._watchdog_tripped = False
 
     @property
     def in_flight(self) -> bool:
@@ -185,8 +182,27 @@ class CleanupController:
         thread.started.connect(runner.run)
         self._thread = thread
         self._runner = runner
+        self._watchdog_tripped = False
         self._progress.show_near_parent(self._monitor)
         thread.start()
+        self._arm_watchdog(runner)
+
+    def _arm_watchdog(self, runner: CleanupRunner) -> None:
+        overrun_ms = int(max(0.0, runner.bounds.deadline_s + WATCHDOG_GRACE_S) * 1000)
+        QTimer.singleShot(overrun_ms, lambda: self._on_watchdog_overrun(runner))
+
+    def _on_watchdog_overrun(self, runner: CleanupRunner) -> None:
+        if not self._in_flight or self._runner is not runner:
+            return
+        self._watchdog_tripped = True
+        LOGGER.warning("Cleanup watchdog tripped — requesting cancel")
+        try:
+            runner.cancel()
+            NotificationService.notify(
+                APP_NAME, "Cleanup is taking too long — cancelling.",
+            )
+        except Exception:  # pylint: disable=broad-exception-caught
+            LOGGER.exception("Watchdog cancel/notify failed")
 
     def _on_cancel_clicked(self) -> None:
         if self._runner is not None:
@@ -267,7 +283,8 @@ class CleanupController:
             return
         try:
             thread.quit()
-            thread.wait(2000)
+            if not thread.wait(TEARDOWN_WAIT_MS):
+                LOGGER.error("Cleanup worker did not stop in %d ms", TEARDOWN_WAIT_MS)
         except RuntimeError:
             pass
         if runner is not None:

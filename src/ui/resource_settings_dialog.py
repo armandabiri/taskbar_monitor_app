@@ -251,8 +251,35 @@ class ResourceSettingsDialog(QDialog):
         button_box.rejected.connect(self.reject)
         layout.addWidget(button_box)
 
+        # ---- Sampler cadence -----------------------------------------------
+        cadence_group = QGroupBox("Sampler cadence")
+        cadence_form = QFormLayout(cadence_group)
+
+        self._active_interval = QSpinBox()
+        self._active_interval.setRange(100, 10000)
+        self._active_interval.setSuffix(" ms")
+        self._active_interval.setSingleStep(100)
+        self._active_interval.setToolTip("Polling interval when the monitor window is visible.")
+        cadence_form.addRow("Active interval:", self._active_interval)
+
+        self._hidden_interval = QSpinBox()
+        self._hidden_interval.setRange(500, 60000)
+        self._hidden_interval.setSuffix(" ms")
+        self._hidden_interval.setSingleStep(500)
+        self._hidden_interval.setToolTip("Polling interval when the window is hidden or minimized.")
+        cadence_form.addRow("Hidden interval:", self._hidden_interval)
+
+        self._pause_on_battery = QCheckBox("Use hidden interval when on battery")
+        self._pause_on_battery.setToolTip(
+            "Slow polling to the hidden-window rate whenever running on battery power."
+        )
+        cadence_form.addRow("", self._pause_on_battery)
+
+        layout.addWidget(cadence_group)
+
         self._populate_profiles()
         self._connect_signals()
+        self._load_cadence_settings()
 
     # ------------------------------------------------------------------
     # Population & sync
@@ -280,6 +307,20 @@ class ResourceSettingsDialog(QDialog):
             self._load_profile_into_editor(editor_name)
         finally:
             self._loading = False
+
+    def _load_cadence_settings(self) -> None:
+        from core.config import DEFAULT_INTERVAL_MS, read_setting_int
+        active = read_setting_int(self._settings, "sampler/active_interval_ms", DEFAULT_INTERVAL_MS)
+        hidden = read_setting_int(self._settings, "sampler/hidden_interval_ms", 5000)
+        pause = bool(read_setting_int(self._settings, "sampler/pause_on_battery", 0))
+        self._active_interval.setValue(active)
+        self._hidden_interval.setValue(hidden)
+        self._pause_on_battery.setChecked(pause)
+
+    def _save_cadence_settings(self) -> None:
+        self._settings.setValue("sampler/active_interval_ms", self._active_interval.value())
+        self._settings.setValue("sampler/hidden_interval_ms", self._hidden_interval.value())
+        self._settings.setValue("sampler/pause_on_battery", 1 if self._pause_on_battery.isChecked() else 0)
 
     def _connect_signals(self) -> None:
         self._editor_combo.currentTextChanged.connect(self._on_editor_changed)
@@ -381,6 +422,7 @@ class ResourceSettingsDialog(QDialog):
             self._settings.setValue(_LAST_EDITOR_PROFILE_KEY, edited.name)
             self._settings.sync()
 
+            self._save_cadence_settings()
             if self._on_apply is not None:
                 self._on_apply()
         except Exception:  # pylint: disable=broad-exception-caught
